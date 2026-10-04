@@ -17,7 +17,6 @@
   let homeSearch = "";
   let studyState = null;
   let dictationState = null;
-  let audioStopTimer = null;
   let phaseFrame = null;
   let feedbackTimer = null;
   let toastTimer = null;
@@ -182,10 +181,6 @@
   }
 
   function stopAudio() {
-    if (audioStopTimer) {
-      window.clearInterval(audioStopTimer);
-      audioStopTimer = null;
-    }
     audioElement.pause();
     audioElement.playbackRate = 1;
     audioElement.volume = 1;
@@ -207,93 +202,29 @@
     clearDictationTimers();
   }
 
-  function playRange(audioFile, range, rate = 1) {
-    if (!audioFile || !range) {
+  function playClip(audioFile, rate = 1) {
+    if (!audioFile) {
       return false;
     }
     stopAudio();
     const targetUrl = new URL(audioFile, window.location.href).href;
-    const needsNewSource = audioElement.src !== targetUrl;
-    if (needsNewSource) {
+    if (audioElement.src !== targetUrl) {
       audioElement.src = targetUrl;
       audioElement.load();
     }
-
-    const token = `${Date.now()}-${Math.random()}`;
-    audioElement.dataset.playToken = token;
-    let seekAttempts = 0;
-    let started = false;
-    const seekAndPlay = () => {
-      if (
-        started ||
-        audioElement.dataset.playToken !== token
-      ) {
-        return;
-      }
-      const start = Math.max(0, Number(range.start) || 0);
-      const completeSeek = () => {
-        if (started || audioElement.dataset.playToken !== token) {
-          return;
-        }
-        started = true;
-        audioElement.volume = 1;
-        audioStopTimer = window.setInterval(() => {
-          if (
-            !Number.isFinite(audioElement.duration) ||
-            audioElement.currentTime >= Number(range.end)
-          ) {
-            audioElement.pause();
-            window.clearInterval(audioStopTimer);
-            audioStopTimer = null;
-          }
-        }, 30);
-      };
-      const ensureSeek = () => {
-        if (started || audioElement.dataset.playToken !== token) {
-          return;
-        }
-        if (Math.abs(audioElement.currentTime - start) < 0.22) {
-          completeSeek();
-          return;
-        }
-        if (seekAttempts < 3) {
-          seekAttempts += 1;
-          audioElement.currentTime = start;
-          window.setTimeout(ensureSeek, 220);
-          return;
-        }
-        audioElement.pause();
-        audioElement.volume = 1;
-        showToast("无法定位到该词，请重新点击播放");
-      };
-
-      audioElement.volume = 0;
-      audioElement.playbackRate = rate;
-      audioElement
-        .play()
-        .then(ensureSeek)
-        .catch(() => {
-          audioElement.volume = 1;
-          showToast("点击播放按钮后可播放录音");
-        });
-      audioElement.currentTime = start;
-    };
-
-    if (audioElement.readyState >= 2) {
-      seekAndPlay();
-    } else {
-      const onReady = () => seekAndPlay();
-      audioElement.addEventListener("canplay", onReady, { once: true });
-      audioElement.addEventListener("loadeddata", onReady, { once: true });
-      audioElement.addEventListener("loadedmetadata", onReady, { once: true });
-    }
+    audioElement.currentTime = 0;
+    audioElement.playbackRate = rate;
+    audioElement.volume = 1;
+    audioElement.play().catch(() => {
+      showToast("点击播放按钮后可播放录音");
+    });
     return true;
   }
 
   function playEnglish(scene, word, rate = 1) {
-    const audioFile = word.audioFile || scene.audioFile;
-    if (audioFile && word.audio) {
-      playRange(audioFile, word.audio, rate);
+    const audioFile = word.audioClip || word.audioFile || scene.audioFile;
+    if (audioFile && (word.audioClip || word.audio)) {
+      playClip(audioFile, rate);
     } else {
       showToast("该词原录音未覆盖，暂不可播放");
     }
