@@ -22,9 +22,8 @@
   let phaseFrame = null;
   let feedbackTimer = null;
   let toastTimer = null;
-  const audioBundlePromises = new Map();
-  const audioObjectUrls = new Map();
   const sceneSearchCache = new Map();
+  let voicesCache = [];
 
   const sceneById = new Map(DATA.scenes.map((scene) => [scene.id, scene]));
   const wordIndex = new Map();
@@ -189,6 +188,9 @@
     audioElement.pause();
     audioElement.playbackRate = 1;
     audioElement.volume = 1;
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
   }
 
   function clearDictationTimers() {
@@ -207,125 +209,65 @@
     clearDictationTimers();
   }
 
-  function playFileClip(audioPath, rate = 1) {
-    if (!audioPath) {
-      return false;
+  function refreshVoices() {
+    if ("speechSynthesis" in window) {
+      voicesCache = window.speechSynthesis.getVoices();
     }
-    stopAudio();
-    audioElement.src = new URL(audioPath, window.location.href).href;
-    audioElement.load();
-    audioElement.playbackRate = rate;
-    audioElement.volume = 1;
-    audioElement.play().catch(() => {
-      showToast("点击播放按钮后可播放录音");
-    });
-    return true;
   }
 
-  function playEncodedClip(encoded, cacheKey, rate = 1) {
-    if (!encoded) {
-      return false;
+  function preferredEnglishVoice() {
+    if (!voicesCache.length) {
+      refreshVoices();
     }
-    let objectUrl = audioObjectUrls.get(cacheKey);
-    if (!objectUrl) {
-      try {
-        const binary = window.atob(encoded);
-        const bytes = new Uint8Array(binary.length);
-        for (let index = 0; index < binary.length; index += 1) {
-          bytes[index] = binary.charCodeAt(index);
-        }
-        objectUrl = URL.createObjectURL(
-          new Blob([bytes], { type: "audio/mpeg" }),
-        );
-        audioObjectUrls.set(cacheKey, objectUrl);
-      } catch {
-        showToast("音频数据读取失败");
-        return false;
+    const preferredNames = [
+      "samantha",
+      "ava",
+      "serena",
+      "allison",
+      "daniel",
+      "karen",
+      "moira",
+      "tessa",
+    ];
+    for (const name of preferredNames) {
+      const voice = voicesCache.find(
+        (item) => item.name.toLowerCase() === name,
+      );
+      if (voice) {
+        return voice;
       }
     }
+    return (
+      voicesCache.find((voice) => voice.lang.toLowerCase().startsWith("en-gb")) ||
+      voicesCache.find((voice) => voice.lang.toLowerCase().startsWith("en")) ||
+      null
+    );
+  }
 
+  function speakWord(text, rate = 0.9) {
     stopAudio();
-    audioElement.src = objectUrl;
-    audioElement.load();
-    audioElement.currentTime = 0;
-    audioElement.playbackRate = rate;
-    audioElement.volume = 1;
-    audioElement.play().catch(() => {
-      showToast("点击播放按钮后可播放录音");
-    });
-    return true;
-  }
-
-  function loadAudioBundle(sceneId) {
-    if (window.VOCAB_AUDIO_BUNDLES?.[sceneId]) {
-      return Promise.resolve();
-    }
-    if (audioBundlePromises.has(sceneId)) {
-      return audioBundlePromises.get(sceneId);
-    }
-    const promise = new Promise((resolve, reject) => {
-      const script = document.createElement("script");
-      script.src = new URL(
-        `audio/bundles/${sceneId}.js`,
-        window.location.href,
-      ).href;
-      script.onload = () => resolve();
-      script.onerror = () => reject(new Error("audio bundle failed"));
-      document.head.appendChild(script);
-    }).catch((error) => {
-      audioBundlePromises.delete(sceneId);
-      throw error;
-    });
-    audioBundlePromises.set(sceneId, promise);
-    return promise;
-  }
-
-  function preloadSceneAudio(words) {
-    if (window.location.protocol === "file:") {
+    if (!("speechSynthesis" in window)) {
+      showToast("当前浏览器不支持英文语音");
       return;
     }
-    const bundleIds = new Set(
-      words
-        .map((word) => word.audioBundle)
-        .filter(Boolean),
-    );
-    bundleIds.forEach((sceneId) => {
-      loadAudioBundle(sceneId).catch(() => {});
-    });
+    const utterance = new SpeechSynthesisUtterance(text);
+    const voice = preferredEnglishVoice();
+    if (voice) {
+      utterance.voice = voice;
+      utterance.lang = voice.lang;
+    } else {
+      utterance.lang = "en-GB";
+    }
+    utterance.rate = rate;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+    window.__lastSpokenText = text;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
   }
 
   function playEnglish(scene, word, rate = 1) {
-    if (window.location.protocol === "file:" && word.audioPath) {
-      playFileClip(word.audioPath, rate);
-      return;
-    }
-    if (!word.audioBundle || !word.audioKey) {
-      showToast("该词原录音未覆盖，暂不可播放");
-      return;
-    }
-    const play = () => {
-      const encoded = window.VOCAB_AUDIO_BUNDLES?.[word.audioBundle]?.[
-        word.audioKey
-      ];
-      if (!encoded) {
-        showToast("该词原录音未覆盖，暂不可播放");
-        return;
-      }
-      playEncodedClip(
-        encoded,
-        `${word.audioBundle}:${word.audioKey}`,
-        rate,
-      );
-    };
-    const bundle = window.VOCAB_AUDIO_BUNDLES?.[word.audioBundle];
-    if (bundle) {
-      play();
-      return;
-    }
-    showToast("正在加载原声");
-    loadAudioBundle(word.audioBundle).then(play).catch(() => {
-      showToast("原声加载失败，请重新点击");
-    });
+    speakWord(word.english, rate * 0.9);
   }
 
   function sceneColor(index) {
@@ -333,15 +275,8 @@
   }
 
   function sceneCardMarkup(scene, index) {
-    const audioCount =
-      scene.audioCount ??
-      scene.words.filter((word) => Boolean(word.audio)).length;
-    const audioLabel = scene.supplement
-      ? audioCount
-        ? `原声 ${audioCount}/${scene.words.length}`
-        : "暂无可播放原声"
-      : "原录音";
-    const dictationDisabled = audioCount === 0;
+    const audioLabel = "合成发音";
+    const dictationDisabled = !("speechSynthesis" in window);
 
     return `
       <article
@@ -353,8 +288,8 @@
         <div class="scene-card-body">
           <div class="scene-topline">
             <span class="scene-index">${String(index + 1).padStart(2, "0")}</span>
-            <span class="audio-badge ${audioCount ? "" : "speech"}">
-              <i data-lucide="${audioCount ? "audio-lines" : "volume-x"}"></i>
+            <span class="audio-badge">
+              <i data-lucide="volume-2"></i>
               ${audioLabel}
             </span>
           </div>
@@ -514,15 +449,7 @@
     const detailMeta = [word.partOfSpeech, word.phonetic]
       .filter(Boolean)
       .join(" · ");
-    const prompt = !word.audio
-      ? `
-        <div class="study-prompt">
-          ${detailMeta ? `<span class="detail-meta">${escapeHtml(detailMeta)}</span>` : ""}
-          <strong>${escapeHtml(word.chinese)}</strong>
-          ${word.definition ? `<p>${escapeHtml(word.definition)}</p>` : ""}
-        </div>
-      `
-      : "";
+    const prompt = "";
     const feedback = studyState.checked
       ? `
         <div class="study-feedback ${isDone ? "correct" : "wrong"}">
@@ -599,25 +526,22 @@
               class="audio-main-button"
               type="button"
               data-action="study-play"
-              ${word.audio ? "" : "disabled"}
               aria-label="播放当前单词"
             >
               <i data-lucide="volume-2"></i>
             </button>
             <div class="audio-options">
-              ${word.audio ? `
-                <label>
-                  速度
-                  <select data-role="study-rate">
-                    <option value="0.75">0.75×</option>
-                    <option value="1" selected>1.0×</option>
-                  </select>
-                </label>
-                <button class="btn btn-secondary" type="button" data-action="study-replay">
-                  <i data-lucide="rotate-ccw"></i>
-                  再听
-                </button>
-              ` : `<span class="muted">该词原录音未覆盖</span>`}
+              <label>
+                速度
+                <select data-role="study-rate">
+                  <option value="0.75">0.75×</option>
+                  <option value="1" selected>1.0×</option>
+                </select>
+              </label>
+              <button class="btn btn-secondary" type="button" data-action="study-replay">
+                <i data-lucide="rotate-ccw"></i>
+                再听
+              </button>
             </div>
           </div>
 
@@ -664,7 +588,6 @@
     `;
     setActiveNav("home");
     refreshIcons();
-    preloadSceneAudio(scene.words);
     const input = document.getElementById("studyAnswer");
     if (!studyState.checked && input) {
       input.focus();
@@ -767,6 +690,14 @@
               spellcheck="false"
               aria-label="英文拼写"
             >
+            <button
+              class="btn btn-secondary"
+              type="button"
+              data-action="dictation-replay"
+            >
+              <i data-lucide="rotate-ccw"></i>
+              再听
+            </button>
           </div>
         </div>
       `;
@@ -841,11 +772,6 @@
     `;
     setActiveNav(dictationState.kind === "wrong" ? "wrong" : "home");
     refreshIcons();
-    preloadSceneAudio(
-      dictationState.kind === "wrong"
-        ? dictationState.queue.map((item) => item.word)
-        : dictationState.scene.words,
-    );
 
     if (dictationState.phase === "spell") {
       const input = document.getElementById("dictationAnswer");
@@ -1040,10 +966,7 @@
   }
 
   function buildDictationQueue(scene) {
-    return shuffle(scene.words.filter((word) => word.audio)).map((word) => ({
-      scene,
-      word,
-    }));
+    return shuffle(scene.words).map((word) => ({ scene, word }));
   }
 
   function buildWrongQueue() {
@@ -1355,6 +1278,14 @@
       return;
     }
 
+    if (action === "dictation-replay") {
+      const current = currentDictationWord();
+      if (current) {
+        playEnglish(current.scene, current.word, 1);
+      }
+      return;
+    }
+
     if (action === "dictation-restart") {
       if (dictationState.kind === "wrong") {
         startWrongDictation();
@@ -1432,6 +1363,11 @@
       finishSpellPhase();
     }
   });
+
+  refreshVoices();
+  if ("speechSynthesis" in window) {
+    window.speechSynthesis.addEventListener("voiceschanged", refreshVoices);
+  }
 
   window.addEventListener("hashchange", renderRoute);
   updateWrongCount();
