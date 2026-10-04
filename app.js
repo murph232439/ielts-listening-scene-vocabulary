@@ -21,7 +21,6 @@
   let phaseFrame = null;
   let feedbackTimer = null;
   let toastTimer = null;
-  let voicesCache = [];
 
   const sceneById = new Map(DATA.scenes.map((scene) => [scene.id, scene]));
   const wordIndex = new Map();
@@ -189,9 +188,7 @@
     }
     audioElement.pause();
     audioElement.playbackRate = 1;
-    if ("speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
+    audioElement.volume = 1;
   }
 
   function clearDictationTimers() {
@@ -210,34 +207,6 @@
     clearDictationTimers();
   }
 
-  function preferredVoice(languagePrefix) {
-    if (!voicesCache.length && "speechSynthesis" in window) {
-      voicesCache = window.speechSynthesis.getVoices();
-    }
-    return (
-      voicesCache.find((voice) =>
-        voice.lang.toLowerCase().startsWith(languagePrefix.toLowerCase()),
-      ) || null
-    );
-  }
-
-  function speak(text, language = "en", rate = 0.85) {
-    stopAudio();
-    if (!("speechSynthesis" in window)) {
-      showToast("当前浏览器不支持语音合成");
-      return;
-    }
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = language === "zh" ? "zh-CN" : "en-GB";
-    utterance.rate = rate;
-    utterance.pitch = 1;
-    const voice = preferredVoice(language);
-    if (voice) {
-      utterance.voice = voice;
-    }
-    window.speechSynthesis.speak(utterance);
-  }
-
   function playRange(scene, range, rate = 1) {
     if (!scene.hasRecording || !scene.audioFile || !range) {
       return false;
@@ -250,45 +219,82 @@
       audioElement.load();
     }
 
-    const play = () => {
-      audioElement.currentTime = Math.max(0, Number(range.start) || 0);
-      audioElement.playbackRate = rate;
-      audioElement.play().catch(() => {
-        showToast("点击播放按钮后可播放录音");
-      });
-      audioStopTimer = window.setInterval(() => {
-        if (
-          !Number.isFinite(audioElement.duration) ||
-          audioElement.currentTime >= Number(range.end)
-        ) {
-          audioElement.pause();
-          window.clearInterval(audioStopTimer);
-          audioStopTimer = null;
+    const token = `${Date.now()}-${Math.random()}`;
+    audioElement.dataset.playToken = token;
+    let seekAttempts = 0;
+    let started = false;
+    const seekAndPlay = () => {
+      if (
+        started ||
+        audioElement.dataset.playToken !== token
+      ) {
+        return;
+      }
+      const start = Math.max(0, Number(range.start) || 0);
+      const completeSeek = () => {
+        if (started || audioElement.dataset.playToken !== token) {
+          return;
         }
-      }, 30);
+        started = true;
+        audioElement.volume = 1;
+        audioStopTimer = window.setInterval(() => {
+          if (
+            !Number.isFinite(audioElement.duration) ||
+            audioElement.currentTime >= Number(range.end)
+          ) {
+            audioElement.pause();
+            window.clearInterval(audioStopTimer);
+            audioStopTimer = null;
+          }
+        }, 30);
+      };
+      const ensureSeek = () => {
+        if (started || audioElement.dataset.playToken !== token) {
+          return;
+        }
+        if (Math.abs(audioElement.currentTime - start) < 0.22) {
+          completeSeek();
+          return;
+        }
+        if (seekAttempts < 3) {
+          seekAttempts += 1;
+          audioElement.currentTime = start;
+          window.setTimeout(ensureSeek, 220);
+          return;
+        }
+        audioElement.pause();
+        audioElement.volume = 1;
+        showToast("无法定位到该词，请重新点击播放");
+      };
+
+      audioElement.volume = 0;
+      audioElement.playbackRate = rate;
+      audioElement
+        .play()
+        .then(ensureSeek)
+        .catch(() => {
+          audioElement.volume = 1;
+          showToast("点击播放按钮后可播放录音");
+        });
+      audioElement.currentTime = start;
     };
 
-    if (needsNewSource && audioElement.readyState < 1) {
-      audioElement.addEventListener("loadedmetadata", play, { once: true });
+    if (audioElement.readyState >= 2) {
+      seekAndPlay();
     } else {
-      play();
+      const onReady = () => seekAndPlay();
+      audioElement.addEventListener("canplay", onReady, { once: true });
+      audioElement.addEventListener("loadeddata", onReady, { once: true });
+      audioElement.addEventListener("loadedmetadata", onReady, { once: true });
     }
     return true;
   }
 
   function playEnglish(scene, word, rate = 1) {
-    if (scene.hasRecording) {
+    if (scene.hasRecording && word.audio) {
       playRange(scene, word.audio, rate);
     } else {
-      speak(word.english, "en", rate);
-    }
-  }
-
-  function playChinese(scene, word) {
-    if (scene.hasRecording && word.answerAudio) {
-      playRange(scene, word.answerAudio, 1);
-    } else {
-      speak(word.chinese, "zh", 0.9);
+      showToast("该词原录音未覆盖，暂不可播放");
     }
   }
 
@@ -311,8 +317,8 @@
         if (query && !searchable.includes(query)) {
           return "";
         }
-        const audioLabel = scene.hasRecording ? "原录音" : "语音合成";
-        const audioIcon = scene.hasRecording ? "audio-lines" : "volume-2";
+        const audioLabel = "原录音";
+        const audioIcon = "audio-lines";
         return `
           <article
             class="scene-card"
@@ -430,15 +436,6 @@
           </p>
           <p class="feedback-answer">${escapeHtml(word.english)}</p>
           <p class="feedback-meaning">${escapeHtml(word.chinese)}</p>
-          <button
-            class="btn btn-quiet"
-            type="button"
-            data-action="study-play-answer"
-            ${scene.hasRecording || "speechSynthesis" in window ? "" : "disabled"}
-          >
-            <i data-lucide="volume-2"></i>
-            播放中文
-          </button>
         </div>
       `
       : `
@@ -501,22 +498,25 @@
               class="audio-main-button"
               type="button"
               data-action="study-play"
+              ${word.audio ? "" : "disabled"}
               aria-label="播放当前单词"
             >
               <i data-lucide="volume-2"></i>
             </button>
             <div class="audio-options">
-              <label>
-                速度
-                <select data-role="study-rate">
-                  <option value="0.75">0.75×</option>
-                  <option value="1" selected>1.0×</option>
-                </select>
-              </label>
-              <button class="btn btn-secondary" type="button" data-action="study-replay">
-                <i data-lucide="rotate-ccw"></i>
-                再听
-              </button>
+              ${word.audio ? `
+                <label>
+                  速度
+                  <select data-role="study-rate">
+                    <option value="0.75">0.75×</option>
+                    <option value="1" selected>1.0×</option>
+                  </select>
+                </label>
+                <button class="btn btn-secondary" type="button" data-action="study-replay">
+                  <i data-lucide="rotate-ccw"></i>
+                  再听
+                </button>
+              ` : `<span class="muted">该词原录音未覆盖</span>`}
             </div>
           </div>
 
@@ -917,7 +917,6 @@
     });
     dictationState.phase = "feedback";
     renderDictation();
-    playChinese(current.scene, current.word);
     feedbackTimer = window.setTimeout(() => {
       if (!dictationState || dictationState.phase !== "feedback") {
         return;
@@ -934,7 +933,10 @@
   }
 
   function buildDictationQueue(scene) {
-    return shuffle(scene.words).map((word) => ({ scene, word }));
+    return shuffle(scene.words.filter((word) => word.audio)).map((word) => ({
+      scene,
+      word,
+    }));
   }
 
   function buildWrongQueue() {
@@ -1185,7 +1187,6 @@
       addWrong(scene, word);
     }
     renderStudy();
-    playChinese(scene, word);
   }
 
   function moveStudy(offset) {
@@ -1220,13 +1221,6 @@
         document.querySelector("[data-role='study-rate']")?.value || 1,
       );
       playEnglish(scene, word, rate);
-      return;
-    }
-
-    if (action === "study-play-answer") {
-      const scene = sceneById.get(studyState.sceneId);
-      const word = scene.words[studyState.index];
-      playChinese(scene, word);
       return;
     }
 
@@ -1329,13 +1323,6 @@
       finishSpellPhase();
     }
   });
-
-  if ("speechSynthesis" in window) {
-    voicesCache = window.speechSynthesis.getVoices();
-    window.speechSynthesis.addEventListener("voiceschanged", () => {
-      voicesCache = window.speechSynthesis.getVoices();
-    });
-  }
 
   window.addEventListener("hashchange", renderRoute);
   updateWrongCount();
