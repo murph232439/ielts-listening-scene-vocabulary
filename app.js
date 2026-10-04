@@ -21,6 +21,7 @@
   let feedbackTimer = null;
   let toastTimer = null;
   const audioBundlePromises = new Map();
+  const sceneSearchCache = new Map();
 
   const sceneById = new Map(DATA.scenes.map((scene) => [scene.id, scene]));
   const wordIndex = new Map();
@@ -291,16 +292,6 @@
     const audioCount =
       scene.audioCount ??
       scene.words.filter((word) => Boolean(word.audio)).length;
-    const searchable = [
-      scene.title,
-      scene.subtitle,
-      ...scene.words.map(
-        (word) =>
-          `${word.english} ${word.chinese} ${word.definition || ""} ${word.example || ""}`,
-      ),
-    ]
-      .join(" ")
-      .toLowerCase();
     const audioLabel = scene.supplement
       ? audioCount
         ? `原声 ${audioCount}/${scene.words.length}`
@@ -313,7 +304,7 @@
         class="scene-card ${scene.supplement ? "supplement-card" : ""}"
         style="--scene-color:${sceneColor(index)}"
         data-scene-card
-        data-search="${escapeHtml(searchable)}"
+        data-scene-id="${escapeHtml(scene.id)}"
       >
         <div class="scene-card-body">
           <div class="scene-topline">
@@ -353,6 +344,25 @@
     `;
   }
 
+  function searchTextForScene(scene) {
+    if (!sceneSearchCache.has(scene.id)) {
+      sceneSearchCache.set(
+        scene.id,
+        [
+          scene.title,
+          scene.subtitle,
+          ...scene.words.map(
+            (word) =>
+              `${word.english} ${word.chinese} ${word.definition || ""} ${word.example || ""}`,
+          ),
+        ]
+          .join(" ")
+          .toLowerCase(),
+      );
+    }
+    return sceneSearchCache.get(scene.id);
+  }
+
   function renderHome() {
     const query = homeSearch.trim().toLowerCase();
     const originalScenes = DATA.scenes.filter((scene) => !scene.supplement);
@@ -361,17 +371,7 @@
       if (!query) {
         return true;
       }
-      const searchable = [
-        scene.title,
-        scene.subtitle,
-        ...scene.words.map(
-          (word) =>
-            `${word.english} ${word.chinese} ${word.definition || ""} ${word.example || ""}`,
-        ),
-      ]
-        .join(" ")
-        .toLowerCase();
-      return searchable.includes(query);
+      return searchTextForScene(scene).includes(query);
     };
     const originalCards = originalScenes
       .filter(matches)
@@ -1366,7 +1366,9 @@
       homeSearch = event.target.value;
       const query = homeSearch.trim().toLowerCase();
       document.querySelectorAll("[data-scene-card]").forEach((card) => {
-        card.hidden = query && !card.dataset.search.includes(query);
+        const scene = sceneById.get(card.dataset.sceneId);
+        card.hidden =
+          query && scene && !searchTextForScene(scene).includes(query);
       });
       return;
     }
