@@ -293,6 +293,36 @@ svg {
   gap: 16px;
 }
 
+.section-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  margin: 38px 0 16px;
+}
+
+.section-heading:first-of-type {
+  margin-top: 10px;
+}
+
+.section-heading h2 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.section-heading p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.section-heading > span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .scene-card {
   position: relative;
   display: flex;
@@ -352,6 +382,10 @@ svg {
 .audio-badge svg {
   width: 13px;
   height: 13px;
+}
+
+.supplement-card::before {
+  background: var(--amber);
 }
 
 .scene-card h2 {
@@ -652,6 +686,37 @@ svg {
   background: #f7f9f7;
 }
 
+.study-prompt {
+  margin: 28px 0 0;
+  padding: 18px;
+  border-left: 4px solid var(--amber);
+  border-radius: 0 8px 8px 0;
+  background: var(--amber-soft);
+}
+
+.study-prompt strong,
+.study-prompt p {
+  display: block;
+}
+
+.study-prompt strong {
+  margin-top: 5px;
+  font-size: 22px;
+}
+
+.study-prompt p {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.detail-meta,
+.feedback-meta {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
 .study-feedback.correct {
   background: var(--teal-soft);
 }
@@ -685,6 +750,24 @@ svg {
 .feedback-meaning {
   margin: 4px 0 0;
   color: var(--muted);
+}
+
+.feedback-meta {
+  margin: 6px 0 0;
+}
+
+.feedback-extra {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.feedback-example {
+  margin: 10px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid rgba(23, 40, 45, 0.1);
+  color: var(--ink);
+  font-size: 13px;
 }
 
 .trainer-nav {

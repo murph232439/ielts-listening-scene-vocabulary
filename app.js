@@ -207,12 +207,12 @@
     clearDictationTimers();
   }
 
-  function playRange(scene, range, rate = 1) {
-    if (!scene.hasRecording || !scene.audioFile || !range) {
+  function playRange(audioFile, range, rate = 1) {
+    if (!audioFile || !range) {
       return false;
     }
     stopAudio();
-    const targetUrl = new URL(scene.audioFile, window.location.href).href;
+    const targetUrl = new URL(audioFile, window.location.href).href;
     const needsNewSource = audioElement.src !== targetUrl;
     if (needsNewSource) {
       audioElement.src = targetUrl;
@@ -291,8 +291,9 @@
   }
 
   function playEnglish(scene, word, rate = 1) {
-    if (scene.hasRecording && word.audio) {
-      playRange(scene, word.audio, rate);
+    const audioFile = word.audioFile || scene.audioFile;
+    if (audioFile && word.audio) {
+      playRange(audioFile, word.audio, rate);
     } else {
       showToast("该词原录音未覆盖，暂不可播放");
     }
@@ -302,86 +303,121 @@
     return SCENE_COLORS[index % SCENE_COLORS.length];
   }
 
+  function sceneCardMarkup(scene, index) {
+    const audioCount =
+      scene.audioCount ??
+      scene.words.filter((word) => Boolean(word.audio)).length;
+    const searchable = [
+      scene.title,
+      scene.subtitle,
+      ...scene.words.map(
+        (word) =>
+          `${word.english} ${word.chinese} ${word.definition || ""} ${word.example || ""}`,
+      ),
+    ]
+      .join(" ")
+      .toLowerCase();
+    const audioLabel = scene.supplement
+      ? audioCount
+        ? `原声 ${audioCount}/${scene.words.length}`
+        : "暂无可播放原声"
+      : "原录音";
+    const dictationDisabled = audioCount === 0;
+
+    return `
+      <article
+        class="scene-card ${scene.supplement ? "supplement-card" : ""}"
+        style="--scene-color:${sceneColor(index)}"
+        data-scene-card
+        data-search="${escapeHtml(searchable)}"
+      >
+        <div class="scene-card-body">
+          <div class="scene-topline">
+            <span class="scene-index">${String(index + 1).padStart(2, "0")}</span>
+            <span class="audio-badge ${audioCount ? "" : "speech"}">
+              <i data-lucide="${audioCount ? "audio-lines" : "volume-x"}"></i>
+              ${audioLabel}
+            </span>
+          </div>
+          <h2>${escapeHtml(scene.title)}</h2>
+          <p class="scene-subtitle">${escapeHtml(scene.subtitle)}</p>
+          <p class="scene-count">${scene.words.length} 个词条</p>
+          <div class="scene-actions">
+            <button
+              class="btn btn-primary"
+              type="button"
+              data-action="navigate"
+              data-route="study/${scene.id}"
+            >
+              <i data-lucide="headphones"></i>
+              学习
+            </button>
+            <button
+              class="btn btn-secondary"
+              type="button"
+              data-action="navigate"
+              data-route="dictation/${scene.id}"
+              ${dictationDisabled ? "disabled" : ""}
+              ${dictationDisabled ? 'title="本场景暂无可播放原声"' : ""}
+            >
+              <i data-lucide="keyboard"></i>
+              听写
+            </button>
+          </div>
+        </div>
+      </article>
+    `;
+  }
+
   function renderHome() {
-    const wrongCount = Object.keys(readWrongBank()).length;
     const query = homeSearch.trim().toLowerCase();
-    const sceneCards = DATA.scenes
-      .map((scene, index) => {
-        const searchable = [
-          scene.title,
-          scene.subtitle,
-          ...scene.words.map((word) => `${word.english} ${word.chinese}`),
-        ]
-          .join(" ")
-          .toLowerCase();
-        if (query && !searchable.includes(query)) {
-          return "";
-        }
-        const audioLabel = "原录音";
-        const audioIcon = "audio-lines";
-        return `
-          <article
-            class="scene-card"
-            style="--scene-color:${sceneColor(index)}"
-            data-scene-card
-            data-search="${escapeHtml(searchable)}"
-          >
-            <div class="scene-card-body">
-              <div class="scene-topline">
-                <span class="scene-index">${String(index + 1).padStart(2, "0")}</span>
-                <span class="audio-badge ${scene.hasRecording ? "" : "speech"}">
-                  <i data-lucide="${audioIcon}"></i>
-                  ${audioLabel}
-                </span>
-              </div>
-              <h2>${escapeHtml(scene.title)}</h2>
-              <p class="scene-subtitle">${escapeHtml(scene.subtitle)}</p>
-              <p class="scene-count">${scene.words.length} 个词条</p>
-              <div class="scene-actions">
-                <button
-                  class="btn btn-primary"
-                  type="button"
-                  data-action="navigate"
-                  data-route="study/${scene.id}"
-                >
-                  <i data-lucide="headphones"></i>
-                  学习
-                </button>
-                <button
-                  class="btn btn-secondary"
-                  type="button"
-                  data-action="navigate"
-                  data-route="dictation/${scene.id}"
-                >
-                  <i data-lucide="keyboard"></i>
-                  听写
-                </button>
-              </div>
-            </div>
-          </article>
-        `;
-      })
+    const originalScenes = DATA.scenes.filter((scene) => !scene.supplement);
+    const supplementScenes = DATA.scenes.filter((scene) => scene.supplement);
+    const matches = (scene) => {
+      if (!query) {
+        return true;
+      }
+      const searchable = [
+        scene.title,
+        scene.subtitle,
+        ...scene.words.map(
+          (word) =>
+            `${word.english} ${word.chinese} ${word.definition || ""} ${word.example || ""}`,
+        ),
+      ]
+        .join(" ")
+        .toLowerCase();
+      return searchable.includes(query);
+    };
+    const originalCards = originalScenes
+      .filter(matches)
+      .map(sceneCardMarkup)
       .join("");
+    const supplementCards = supplementScenes
+      .filter(matches)
+      .map(sceneCardMarkup)
+      .join("");
+    const noResults = !originalCards && !supplementCards;
 
     app.innerHTML = `
       <section class="hero">
         <div>
           <p class="eyebrow">IELTS Listening Vocabulary</p>
           <h1>雅思听力场景词汇</h1>
-          <p class="hero-copy">按场景进入学习或限时听写，错词会自动进入复练库。</p>
+          <p class="hero-copy">原声逐词训练，加课程词汇补充；错词自动进入复练库。</p>
         </div>
         <div class="summary-strip" aria-label="练习统计">
           <div class="summary-item">
-            <strong>${DATA.sceneCount}</strong>
-            <span>场景</span>
+            <strong>${DATA.originalSceneCount}</strong>
+            <span>原声场景</span>
+          </div>
+          <div class="summary-item">
+            <strong>${DATA.supplementSceneCount}</strong>
+            <span>补充场景</span>
           </div>
           <div class="summary-item">
             <strong>${DATA.wordCount}</strong>
-            <span>词条</span>
-          </div>
-          <div class="summary-item">
-            <strong>${wrongCount}</strong>
-            <span>错词</span>
+            <span>总词条</span>
           </div>
         </div>
       </section>
@@ -393,23 +429,43 @@
             id="sceneSearch"
             type="search"
             value="${escapeHtml(homeSearch)}"
-            placeholder="搜索场景、英文或中文"
+            placeholder="搜索场景、英文、中文或释义"
             autocomplete="off"
           >
         </label>
       </div>
 
-      <section class="scene-grid" aria-label="词汇场景">
-        ${sceneCards || `
-          <div class="empty-state" style="grid-column:1/-1">
-            <div>
-              <div class="empty-state-icon"><i data-lucide="search-x"></i></div>
-              <h2>没有匹配场景</h2>
-              <p>换一个英文单词、中文释义或场景名称。</p>
-            </div>
+      ${originalCards ? `
+        <div class="section-heading">
+          <div>
+            <h2>原声训练</h2>
+            <p>只播放原录音中的英文词条切片。</p>
           </div>
-        `}
-      </section>
+          <span>${originalScenes.length} 个场景</span>
+        </div>
+        <section class="scene-grid">${originalCards}</section>
+      ` : ""}
+
+      ${supplementCards ? `
+        <div class="section-heading">
+          <div>
+            <h2>课程补充</h2>
+            <p>含音标、词性、释义、变形和例句；有原声的词可直接播放。</p>
+          </div>
+          <span>${supplementScenes.length} 个场景</span>
+        </div>
+        <section class="scene-grid">${supplementCards}</section>
+      ` : ""}
+
+      ${noResults ? `
+        <div class="empty-state">
+          <div>
+            <div class="empty-state-icon"><i data-lucide="search-x"></i></div>
+            <h2>没有匹配场景</h2>
+            <p>换一个英文单词、中文释义或场景名称。</p>
+          </div>
+        </div>
+      ` : ""}
     `;
     setActiveNav("home");
     refreshIcons();
@@ -427,6 +483,18 @@
     ).length;
     const isDone = studyState.checked && studyState.correct;
     const isWrong = studyState.checked && !studyState.correct;
+    const detailMeta = [word.partOfSpeech, word.phonetic]
+      .filter(Boolean)
+      .join(" · ");
+    const prompt = !word.audio
+      ? `
+        <div class="study-prompt">
+          ${detailMeta ? `<span class="detail-meta">${escapeHtml(detailMeta)}</span>` : ""}
+          <strong>${escapeHtml(word.chinese)}</strong>
+          ${word.definition ? `<p>${escapeHtml(word.definition)}</p>` : ""}
+        </div>
+      `
+      : "";
     const feedback = studyState.checked
       ? `
         <div class="study-feedback ${isDone ? "correct" : "wrong"}">
@@ -435,7 +503,11 @@
             ${isDone ? "拼写正确" : "需要复练"}
           </p>
           <p class="feedback-answer">${escapeHtml(word.english)}</p>
+          ${detailMeta ? `<p class="feedback-meta">${escapeHtml(detailMeta)}</p>` : ""}
           <p class="feedback-meaning">${escapeHtml(word.chinese)}</p>
+          ${word.definition ? `<p class="feedback-extra">${escapeHtml(word.definition)}</p>` : ""}
+          ${word.forms ? `<p class="feedback-extra">变形：${escapeHtml(word.forms)}</p>` : ""}
+          ${word.example ? `<p class="feedback-example">${escapeHtml(word.example)}</p>` : ""}
         </div>
       `
       : `
@@ -492,6 +564,7 @@
           <div class="progress-track" aria-hidden="true">
             <span style="width:${(completedCount / scene.words.length) * 100}%"></span>
           </div>
+          ${prompt}
 
           <div class="audio-console">
             <button
