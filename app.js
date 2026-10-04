@@ -20,6 +20,7 @@
   let phaseFrame = null;
   let feedbackTimer = null;
   let toastTimer = null;
+  const audioBundlePromises = new Map();
 
   const sceneById = new Map(DATA.scenes.map((scene) => [scene.id, scene]));
   const wordIndex = new Map();
@@ -221,13 +222,65 @@
     return true;
   }
 
-  function playEnglish(scene, word, rate = 1) {
-    const audioFile = word.audioClip || word.audioFile || scene.audioFile;
-    if (audioFile && (word.audioClip || word.audio)) {
-      playClip(audioFile, rate);
-    } else {
-      showToast("该词原录音未覆盖，暂不可播放");
+  function loadAudioBundle(sceneId) {
+    if (window.VOCAB_AUDIO_BUNDLES?.[sceneId]) {
+      return Promise.resolve();
     }
+    if (audioBundlePromises.has(sceneId)) {
+      return audioBundlePromises.get(sceneId);
+    }
+    const promise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = new URL(
+        `audio/bundles/${sceneId}.js`,
+        window.location.href,
+      ).href;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("audio bundle failed"));
+      document.head.appendChild(script);
+    }).catch((error) => {
+      audioBundlePromises.delete(sceneId);
+      throw error;
+    });
+    audioBundlePromises.set(sceneId, promise);
+    return promise;
+  }
+
+  function preloadSceneAudio(words) {
+    const bundleIds = new Set(
+      words
+        .map((word) => word.audioBundle)
+        .filter(Boolean),
+    );
+    bundleIds.forEach((sceneId) => {
+      loadAudioBundle(sceneId).catch(() => {});
+    });
+  }
+
+  function playEnglish(scene, word, rate = 1) {
+    if (!word.audioBundle || !word.audioKey) {
+      showToast("该词原录音未覆盖，暂不可播放");
+      return;
+    }
+    const play = () => {
+      const encoded = window.VOCAB_AUDIO_BUNDLES?.[word.audioBundle]?.[
+        word.audioKey
+      ];
+      if (!encoded) {
+        showToast("该词原录音未覆盖，暂不可播放");
+        return;
+      }
+      playClip(`data:audio/mpeg;base64,${encoded}`, rate);
+    };
+    const bundle = window.VOCAB_AUDIO_BUNDLES?.[word.audioBundle];
+    if (bundle) {
+      play();
+      return;
+    }
+    showToast("正在加载原声");
+    loadAudioBundle(word.audioBundle).then(play).catch(() => {
+      showToast("原声加载失败，请重新点击");
+    });
   }
 
   function sceneColor(index) {
@@ -567,6 +620,7 @@
     `;
     setActiveNav("home");
     refreshIcons();
+    preloadSceneAudio(scene.words);
     const input = document.getElementById("studyAnswer");
     if (!studyState.checked && input) {
       input.focus();
@@ -743,6 +797,11 @@
     `;
     setActiveNav(dictationState.kind === "wrong" ? "wrong" : "home");
     refreshIcons();
+    preloadSceneAudio(
+      dictationState.kind === "wrong"
+        ? dictationState.queue.map((item) => item.word)
+        : dictationState.scene.words,
+    );
 
     if (dictationState.phase === "spell") {
       const input = document.getElementById("dictationAnswer");
