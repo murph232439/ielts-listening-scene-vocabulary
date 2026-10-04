@@ -8,8 +8,8 @@
   const wrongCountElement = document.getElementById("navWrongCount");
 
   const STORAGE_KEYS = {
-    wrong: "ielts-scene-vocab-wrong-v1",
-    study: "ielts-scene-vocab-study-v1",
+    wrong: "ielts-scene-vocab-wrong-v2",
+    study: "ielts-scene-vocab-study-v2",
   };
   const SPELL_SECONDS = 15;
   const CHOICE_SECONDS = 10;
