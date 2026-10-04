@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f2f5f1">
+    <meta
+      name="description"
+      content="雅思听力场景词汇学习与限时听写训练"
+    >
+    <title>雅思听力场景词汇训练</title>
+    <link rel="stylesheet" href="styles.css">
+    <script
+      defer
+      src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"
+    ></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#home" aria-label="返回场景首页">
+          <span class="brand-mark" aria-hidden="true">IL</span>
+          <span>
+            <strong>场景词汇训练</strong>
+            <small>IELTS Listening</small>
+          </span>
+        </a>
+
+        <nav class="topnav" aria-label="主导航">
+          <a href="#home" data-nav="home">
+            <i data-lucide="layout-grid"></i>
+            <span>场景</span>
+          </a>
+          <a href="#wrong" data-nav="wrong">
+            <i data-lucide="notebook-tabs"></i>
+            <span>错词库</span>
+            <b id="navWrongCount" class="nav-count">0</b>
+          </a>
+        </nav>
+      </header>
+
+      <main id="app" class="app-main" tabindex="-1"></main>
+    </div>
+
+    <audio id="sceneAudio" preload="none"></audio>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script src="data.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

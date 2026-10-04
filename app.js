@@ -1,0 +1,1349 @@
+(() => {
+  "use strict";
+
+  const DATA = window.SCENE_DATA;
+  const app = document.getElementById("app");
+  const audioElement = document.getElementById("sceneAudio");
+  const toastElement = document.getElementById("toast");
+  const wrongCountElement = document.getElementById("navWrongCount");
+
+  const STORAGE_KEYS = {
+    wrong: "ielts-scene-vocab-wrong-v1",
+    study: "ielts-scene-vocab-study-v1",
+  };
+
+  const SCENE_COLORS = ["#12736f", "#b85235", "#356f9d", "#b47a1d"];
+  const studyColors = {
+    outline: "#12736f",
+    rust: "#b85235",
+    blue: "#356f9d",
+    amber: "#b47a1d",
+  };
+
+  let homeSearch = "";
+  let studyState = null;
+  let dictationState = null;
+  let audioStopTimer = null;
+  let phaseFrame = null;
+  let feedbackTimer = null;
+  let toastTimer = null;
+  let voicesCache = [];
+
+  const sceneById = new Map(DATA.scenes.map((scene) => [scene.id, scene]));
+  const wordIndex = new Map();
+  for (const scene of DATA.scenes) {
+    for (const word of scene.words) {
+      wordIndex.set(`${scene.id}:${word.id}`, { scene, word });
+    }
+  }
+
+  function escapeHtml(value) {
+    return String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+  function normalizeAnswer(value) {
+    return String(value || "")
+      .normalize("NFKC")
+      .toLowerCase()
+      .replaceAll("’", "'")
+      .replace(/[.,!?;:]+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function shuffle(items) {
+    const result = [...items];
+    for (let index = result.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      [result[index], result[swapIndex]] = [result[swapIndex], result[index]];
+    }
+    return result;
+  }
+
+  function readStorage(key, fallback) {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function writeStorage(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      showToast("浏览器未允许本地保存");
+    }
+  }
+
+  function readWrongBank() {
+    return readStorage(STORAGE_KEYS.wrong, {});
+  }
+
+  function writeWrongBank(bank) {
+    writeStorage(STORAGE_KEYS.wrong, bank);
+    updateWrongCount();
+  }
+
+  function updateWrongCount() {
+    const count = Object.keys(readWrongBank()).length;
+    wrongCountElement.textContent = String(count);
+    wrongCountElement.hidden = count === 0;
+  }
+
+  function readStudyProgress() {
+    return readStorage(STORAGE_KEYS.study, {});
+  }
+
+  function saveStudyCompletion(sceneId, completedIds) {
+    const progress = readStudyProgress();
+    progress[sceneId] = [...completedIds];
+    writeStorage(STORAGE_KEYS.study, progress);
+  }
+
+  function getStudyCompletion(sceneId) {
+    const progress = readStudyProgress();
+    return new Set(progress[sceneId] || []);
+  }
+
+  function addWrong(scene, word) {
+    const bank = readWrongBank();
+    const existing = bank[word.id];
+    bank[word.id] = {
+      id: word.id,
+      sceneId: scene.id,
+      english: word.english,
+      chinese: word.chinese,
+      category: word.category,
+      wrongCount: (existing?.wrongCount || 0) + 1,
+      streak: 0,
+      lastWrongAt: Date.now(),
+    };
+    writeWrongBank(bank);
+  }
+
+  function recordCorrect(scene, word) {
+    const bank = readWrongBank();
+    const existing = bank[word.id];
+    if (!existing) {
+      return;
+    }
+    existing.streak = (existing.streak || 0) + 1;
+    if (existing.streak >= 2) {
+      delete bank[word.id];
+      showToast("已连续答对两次，移出错词库");
+    } else {
+      existing.lastWrongAt = Date.now();
+      bank[word.id] = existing;
+    }
+    writeWrongBank(bank);
+  }
+
+  function showToast(message) {
+    window.clearTimeout(toastTimer);
+    toastElement.textContent = message;
+    toastElement.classList.add("show");
+    toastTimer = window.setTimeout(() => {
+      toastElement.classList.remove("show");
+    }, 2200);
+  }
+
+  function refreshIcons() {
+    if (window.lucide) {
+      window.lucide.createIcons({
+        attrs: {
+          "aria-hidden": "true",
+        },
+      });
+    }
+  }
+
+  function route() {
+    const raw = window.location.hash.replace(/^#/, "") || "home";
+    const parts = raw.split("/");
+    return {
+      name: parts[0] || "home",
+      id: parts.slice(1).join("/") || "",
+    };
+  }
+
+  function goTo(path) {
+    const nextHash = `#${path}`;
+    if (window.location.hash === nextHash) {
+      renderRoute();
+    } else {
+      window.location.hash = nextHash;
+    }
+  }
+
+  function setActiveNav(name) {
+    document.querySelectorAll("[data-nav]").forEach((element) => {
+      element.classList.toggle("active", element.dataset.nav === name);
+    });
+  }
+
+  function stopAudio() {
+    if (audioStopTimer) {
+      window.clearInterval(audioStopTimer);
+      audioStopTimer = null;
+    }
+    audioElement.pause();
+    audioElement.playbackRate = 1;
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+  }
+
+  function clearDictationTimers() {
+    if (phaseFrame) {
+      window.cancelAnimationFrame(phaseFrame);
+      phaseFrame = null;
+    }
+    if (feedbackTimer) {
+      window.clearTimeout(feedbackTimer);
+      feedbackTimer = null;
+    }
+  }
+
+  function destroyView() {
+    stopAudio();
+    clearDictationTimers();
+  }
+
+  function preferredVoice(languagePrefix) {
+    if (!voicesCache.length && "speechSynthesis" in window) {
+      voicesCache = window.speechSynthesis.getVoices();
+    }
+    return (
+      voicesCache.find((voice) =>
+        voice.lang.toLowerCase().startsWith(languagePrefix.toLowerCase()),
+      ) || null
+    );
+  }
+
+  function speak(text, language = "en", rate = 0.85) {
+    stopAudio();
+    if (!("speechSynthesis" in window)) {
+      showToast("当前浏览器不支持语音合成");
+      return;
+    }
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = language === "zh" ? "zh-CN" : "en-GB";
+    utterance.rate = rate;
+    utterance.pitch = 1;
+    const voice = preferredVoice(language);
+    if (voice) {
+      utterance.voice = voice;
+    }
+    window.speechSynthesis.speak(utterance);
+  }
+
+  function playRange(scene, range, rate = 1) {
+    if (!scene.hasRecording || !scene.audioFile || !range) {
+      return false;
+    }
+    stopAudio();
+    const targetUrl = new URL(scene.audioFile, window.location.href).href;
+    const needsNewSource = audioElement.src !== targetUrl;
+    if (needsNewSource) {
+      audioElement.src = targetUrl;
+      audioElement.load();
+    }
+
+    const play = () => {
+      audioElement.currentTime = Math.max(0, Number(range.start) || 0);
+      audioElement.playbackRate = rate;
+      audioElement.play().catch(() => {
+        showToast("点击播放按钮后可播放录音");
+      });
+      audioStopTimer = window.setInterval(() => {
+        if (
+          !Number.isFinite(audioElement.duration) ||
+          audioElement.currentTime >= Number(range.end)
+        ) {
+          audioElement.pause();
+          window.clearInterval(audioStopTimer);
+          audioStopTimer = null;
+        }
+      }, 30);
+    };
+
+    if (needsNewSource && audioElement.readyState < 1) {
+      audioElement.addEventListener("loadedmetadata", play, { once: true });
+    } else {
+      play();
+    }
+    return true;
+  }
+
+  function playEnglish(scene, word, rate = 1) {
+    if (scene.hasRecording) {
+      playRange(scene, word.audio, rate);
+    } else {
+      speak(word.english, "en", rate);
+    }
+  }
+
+  function playChinese(scene, word) {
+    if (scene.hasRecording && word.answerAudio) {
+      playRange(scene, word.answerAudio, 1);
+    } else {
+      speak(word.chinese, "zh", 0.9);
+    }
+  }
+
+  function sceneColor(index) {
+    return SCENE_COLORS[index % SCENE_COLORS.length];
+  }
+
+  function renderHome() {
+    const wrongCount = Object.keys(readWrongBank()).length;
+    const query = homeSearch.trim().toLowerCase();
+    const sceneCards = DATA.scenes
+      .map((scene, index) => {
+        const searchable = [
+          scene.title,
+          scene.subtitle,
+          ...scene.words.map((word) => `${word.english} ${word.chinese}`),
+        ]
+          .join(" ")
+          .toLowerCase();
+        if (query && !searchable.includes(query)) {
+          return "";
+        }
+        const audioLabel = scene.hasRecording ? "原录音" : "语音合成";
+        const audioIcon = scene.hasRecording ? "audio-lines" : "volume-2";
+        return `
+          <article
+            class="scene-card"
+            style="--scene-color:${sceneColor(index)}"
+            data-scene-card
+            data-search="${escapeHtml(searchable)}"
+          >
+            <div class="scene-card-body">
+              <div class="scene-topline">
+                <span class="scene-index">${String(index + 1).padStart(2, "0")}</span>
+                <span class="audio-badge ${scene.hasRecording ? "" : "speech"}">
+                  <i data-lucide="${audioIcon}"></i>
+                  ${audioLabel}
+                </span>
+              </div>
+              <h2>${escapeHtml(scene.title)}</h2>
+              <p class="scene-subtitle">${escapeHtml(scene.subtitle)}</p>
+              <p class="scene-count">${scene.words.length} 个词条</p>
+              <div class="scene-actions">
+                <button
+                  class="btn btn-primary"
+                  type="button"
+                  data-action="navigate"
+                  data-route="study/${scene.id}"
+                >
+                  <i data-lucide="headphones"></i>
+                  学习
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  type="button"
+                  data-action="navigate"
+                  data-route="dictation/${scene.id}"
+                >
+                  <i data-lucide="keyboard"></i>
+                  听写
+                </button>
+              </div>
+            </div>
+          </article>
+        `;
+      })
+      .join("");
+
+    app.innerHTML = `
+      <section class="hero">
+        <div>
+          <p class="eyebrow">IELTS Listening Vocabulary</p>
+          <h1>雅思听力场景词汇</h1>
+          <p class="hero-copy">按场景进入学习或限时听写，错词会自动进入复练库。</p>
+        </div>
+        <div class="summary-strip" aria-label="练习统计">
+          <div class="summary-item">
+            <strong>${DATA.sceneCount}</strong>
+            <span>场景</span>
+          </div>
+          <div class="summary-item">
+            <strong>${DATA.wordCount}</strong>
+            <span>词条</span>
+          </div>
+          <div class="summary-item">
+            <strong>${wrongCount}</strong>
+            <span>错词</span>
+          </div>
+        </div>
+      </section>
+
+      <div class="toolbar">
+        <label class="search-field">
+          <i data-lucide="search"></i>
+          <input
+            id="sceneSearch"
+            type="search"
+            value="${escapeHtml(homeSearch)}"
+            placeholder="搜索场景、英文或中文"
+            autocomplete="off"
+          >
+        </label>
+      </div>
+
+      <section class="scene-grid" aria-label="词汇场景">
+        ${sceneCards || `
+          <div class="empty-state" style="grid-column:1/-1">
+            <div>
+              <div class="empty-state-icon"><i data-lucide="search-x"></i></div>
+              <h2>没有匹配场景</h2>
+              <p>换一个英文单词、中文释义或场景名称。</p>
+            </div>
+          </div>
+        `}
+      </section>
+    `;
+    setActiveNav("home");
+    refreshIcons();
+  }
+
+  function renderStudy() {
+    const scene = sceneById.get(studyState.sceneId);
+    if (!scene) {
+      goTo("home");
+      return;
+    }
+    const word = scene.words[studyState.index];
+    const completedCount = scene.words.filter((item) =>
+      studyState.completed.has(item.id),
+    ).length;
+    const isDone = studyState.checked && studyState.correct;
+    const isWrong = studyState.checked && !studyState.correct;
+    const feedback = studyState.checked
+      ? `
+        <div class="study-feedback ${isDone ? "correct" : "wrong"}">
+          <p class="feedback-title ${isDone ? "correct" : "wrong"}">
+            <i data-lucide="${isDone ? "circle-check" : "circle-x"}"></i>
+            ${isDone ? "拼写正确" : "需要复练"}
+          </p>
+          <p class="feedback-answer">${escapeHtml(word.english)}</p>
+          <p class="feedback-meaning">${escapeHtml(word.chinese)}</p>
+          <button
+            class="btn btn-quiet"
+            type="button"
+            data-action="study-play-answer"
+            ${scene.hasRecording || "speechSynthesis" in window ? "" : "disabled"}
+          >
+            <i data-lucide="volume-2"></i>
+            播放中文
+          </button>
+        </div>
+      `
+      : `
+        <div class="study-feedback">
+          <p class="feedback-title">
+            <i data-lucide="ear"></i>
+            听音后输入完整拼写
+          </p>
+          <p class="feedback-meaning">按 Enter 或点击检查。</p>
+        </div>
+      `;
+
+    const list = scene.words
+      .map((item, index) => {
+        const active = index === studyState.index;
+        const done = studyState.completed.has(item.id);
+        return `
+          <button
+            class="word-jump ${active ? "active" : ""}"
+            type="button"
+            data-action="study-jump"
+            data-index="${index}"
+          >
+            <span class="word-number">${index + 1}</span>
+            <span class="word-meta">
+              <strong>${escapeHtml(item.english)}</strong>
+              <span>${escapeHtml(item.chinese)}</span>
+            </span>
+            <span class="word-state ${done ? "done" : ""}">
+              <i data-lucide="${done ? "check" : "volume-2"}"></i>
+            </span>
+          </button>
+        `;
+      })
+      .join("");
+
+    app.innerHTML = `
+      <div class="view-heading">
+        <button class="back-button" type="button" data-action="navigate" data-route="home" aria-label="返回场景">
+          <i data-lucide="arrow-left"></i>
+        </button>
+        <div class="view-heading-copy">
+          <h1>${escapeHtml(scene.title)} · 学习</h1>
+          <p class="view-subtitle">${escapeHtml(scene.subtitle)} · ${scene.words.length} 个词条</p>
+        </div>
+      </div>
+
+      <div class="study-layout">
+        <section class="trainer-panel">
+          <div class="panel-topline">
+            <span class="progress-copy">已完成 ${completedCount} / ${scene.words.length}</span>
+            <span class="category-tag">${escapeHtml(word.category)}</span>
+          </div>
+          <div class="progress-track" aria-hidden="true">
+            <span style="width:${(completedCount / scene.words.length) * 100}%"></span>
+          </div>
+
+          <div class="audio-console">
+            <button
+              class="audio-main-button"
+              type="button"
+              data-action="study-play"
+              aria-label="播放当前单词"
+            >
+              <i data-lucide="volume-2"></i>
+            </button>
+            <div class="audio-options">
+              <label>
+                速度
+                <select data-role="study-rate">
+                  <option value="0.75">0.75×</option>
+                  <option value="1" selected>1.0×</option>
+                </select>
+              </label>
+              <button class="btn btn-secondary" type="button" data-action="study-replay">
+                <i data-lucide="rotate-ccw"></i>
+                再听
+              </button>
+            </div>
+          </div>
+
+          <form class="spell-form" data-role="study-form">
+            <input
+              class="answer-input"
+              id="studyAnswer"
+              type="text"
+              value="${studyState.checked ? escapeHtml(studyState.answer) : ""}"
+              placeholder="输入英文拼写"
+              autocomplete="off"
+              autocapitalize="none"
+              spellcheck="false"
+              aria-label="英文拼写"
+            >
+            <button class="btn btn-primary" type="submit">
+              <i data-lucide="check"></i>
+              检查
+            </button>
+          </form>
+
+          ${feedback}
+
+          <div class="trainer-nav">
+            <button class="btn btn-secondary" type="button" data-action="study-prev">
+              <i data-lucide="chevron-left"></i>
+              上一个
+            </button>
+            <button class="btn btn-primary" type="button" data-action="study-next">
+              下一个
+              <i data-lucide="chevron-right"></i>
+            </button>
+          </div>
+        </section>
+
+        <aside class="word-list-panel">
+          <div class="word-list-header">
+            <h2>本场景词表</h2>
+            <span class="muted">${scene.words.length} 词</span>
+          </div>
+          <div class="word-list">${list}</div>
+        </aside>
+      </div>
+    `;
+    setActiveNav("home");
+    refreshIcons();
+    const input = document.getElementById("studyAnswer");
+    if (!studyState.checked && input) {
+      input.focus();
+    }
+  }
+
+  function buildOptions(scene, word) {
+    const meanings = [
+      ...new Set(
+        scene.words
+          .map((item) => item.chinese)
+          .filter((meaning) => meaning !== word.chinese),
+      ),
+    ];
+    const distractors = shuffle(meanings).slice(0, 3);
+    return shuffle([word.chinese, ...distractors]);
+  }
+
+  function currentDictationWord() {
+    if (!dictationState || !dictationState.queue.length) {
+      return null;
+    }
+    return dictationState.queue[dictationState.index] || null;
+  }
+
+  function renderDictationHeader() {
+    const current = currentDictationWord();
+    const title =
+      dictationState.kind === "wrong"
+        ? "错词听写"
+        : `${dictationState.scene.title} · 听写`;
+    const total = dictationState.queue.length;
+    const currentNumber = Math.min(dictationState.index + 1, total);
+    return `
+      <div class="view-heading">
+        <button
+          class="back-button"
+          type="button"
+          data-action="navigate"
+          data-route="${dictationState.kind === "wrong" ? "wrong" : "home"}"
+          aria-label="返回"
+        >
+          <i data-lucide="arrow-left"></i>
+        </button>
+        <div class="view-heading-copy">
+          <h1>${escapeHtml(title)}</h1>
+          <p class="view-subtitle">
+            ${current ? `第 ${currentNumber} / ${total} 词` : `${total} 个词条`}
+          </p>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderDictation() {
+    if (!dictationState || dictationState.queue.length === 0) {
+      renderEmptyDictation();
+      return;
+    }
+
+    if (dictationState.phase === "done") {
+      renderDictationSummary();
+      return;
+    }
+
+    const current = currentDictationWord();
+    const scene = current.scene;
+    const word = current.word;
+    const total = dictationState.queue.length;
+    const progress = ((dictationState.index + 1) / total) * 100;
+    let content = "";
+
+    if (dictationState.phase === "spell") {
+      content = `
+        <div class="dictation-phase">
+          <div class="phase-content">
+            <div class="countdown-ring" aria-label="听写倒计时">
+              <svg viewBox="0 0 136 136" aria-hidden="true">
+                <circle class="countdown-base" cx="68" cy="68" r="60"></circle>
+                <circle
+                  class="countdown-value"
+                  id="countdownCircle"
+                  cx="68"
+                  cy="68"
+                  r="60"
+                ></circle>
+              </svg>
+              <span class="countdown-number" id="countdownNumber">3</span>
+            </div>
+            <h2 class="phase-title">听音拼写</h2>
+            <p class="phase-note">倒计时结束后进入中文选择</p>
+            <input
+              class="dictation-spell-input"
+              id="dictationAnswer"
+              type="text"
+              value="${escapeHtml(dictationState.spellValue)}"
+              placeholder="输入英文"
+              autocomplete="off"
+              autocapitalize="none"
+              spellcheck="false"
+              aria-label="英文拼写"
+            >
+          </div>
+        </div>
+      `;
+    } else if (dictationState.phase === "meaning") {
+      content = `
+        <div class="dictation-phase">
+          <div class="phase-content">
+            <div class="countdown-ring" aria-label="选择倒计时">
+              <svg viewBox="0 0 136 136" aria-hidden="true">
+                <circle class="countdown-base" cx="68" cy="68" r="60"></circle>
+                <circle
+                  class="countdown-value"
+                  id="countdownCircle"
+                  cx="68"
+                  cy="68"
+                  r="60"
+                ></circle>
+              </svg>
+              <span class="countdown-number" id="countdownNumber">2</span>
+            </div>
+            <h2 class="phase-title">选择中文意思</h2>
+            <p class="phase-note">
+              你的拼写：${dictationState.spellValue.trim() ? escapeHtml(dictationState.spellValue) : "未填写"}
+            </p>
+            <div class="options-grid">
+              ${dictationState.options
+                .map(
+                  (option) => `
+                    <button
+                      class="option-button"
+                      type="button"
+                      data-action="dictation-option"
+                      data-option="${escapeHtml(option)}"
+                    >
+                      ${escapeHtml(option)}
+                    </button>
+                  `,
+                )
+                .join("")}
+            </div>
+          </div>
+        </div>
+      `;
+    } else if (dictationState.phase === "feedback") {
+      const result = dictationState.results.at(-1);
+      content = `
+        <div class="dictation-feedback">
+          <div>
+            <div class="feedback-icon ${result.correct ? "correct" : "wrong"}">
+              <i data-lucide="${result.correct ? "circle-check" : "circle-x"}"></i>
+            </div>
+            <h2>${result.correct ? "正确" : "已加入错词库"}</h2>
+            <p><strong>${escapeHtml(word.english)}</strong></p>
+            <p>${escapeHtml(word.chinese)}</p>
+          </div>
+        </div>
+      `;
+    }
+
+    app.innerHTML = `
+      ${renderDictationHeader()}
+      <section class="dictation-panel">
+        <div class="dictation-kicker">
+          <span>${escapeHtml(word.category)}</span>
+          <span>${dictationState.index + 1} / ${total}</span>
+        </div>
+        <div class="progress-track" aria-hidden="true">
+          <span style="width:${progress}%"></span>
+        </div>
+        ${content}
+      </section>
+    `;
+    setActiveNav(dictationState.kind === "wrong" ? "wrong" : "home");
+    refreshIcons();
+
+    if (dictationState.phase === "spell") {
+      const input = document.getElementById("dictationAnswer");
+      input?.focus();
+      setCountdownAppearance(3);
+      schedulePhase(3, finishSpellPhase, updateCountdown);
+    } else if (dictationState.phase === "meaning") {
+      setCountdownAppearance(2);
+      schedulePhase(2, () => finishMeaningPhase(null), updateCountdown);
+    }
+  }
+
+  function renderEmptyDictation() {
+    app.innerHTML = `
+      ${renderDictationHeader()}
+      <div class="empty-state">
+        <div>
+          <div class="empty-state-icon"><i data-lucide="notebook-tabs"></i></div>
+          <h2>错词库为空</h2>
+          <p>完成一次听写后，答错或未拼出的词会出现在这里。</p>
+          <button class="btn btn-primary" type="button" data-action="navigate" data-route="home">
+            <i data-lucide="arrow-left"></i>
+            返回场景
+          </button>
+        </div>
+      </div>
+    `;
+    refreshIcons();
+  }
+
+  function renderDictationSummary() {
+    const wrongResults = dictationState.results.filter((result) => !result.correct);
+    const correctCount = dictationState.results.length - wrongResults.length;
+    app.innerHTML = `
+      ${renderDictationHeader()}
+      <section class="session-summary">
+        <div class="summary-score">
+          <div class="score-circle">${correctCount}/${dictationState.results.length}</div>
+          <div>
+            <h2>本轮完成</h2>
+            <p>${wrongResults.length ? `${wrongResults.length} 个词已进入错词库` : "本轮全部正确"}</p>
+          </div>
+        </div>
+
+        ${wrongResults.length ? `
+          <div class="result-list">
+            ${wrongResults
+              .map(
+                (result) => `
+                  <div class="result-row">
+                    <div>
+                      <strong>${escapeHtml(result.word.english)}</strong>
+                      <span>${escapeHtml(result.word.chinese)}</span>
+                    </div>
+                    <span class="result-mark">待复练</span>
+                  </div>
+                `,
+              )
+              .join("")}
+          </div>
+        ` : ""}
+
+        <div class="summary-actions">
+          <button class="btn btn-primary" type="button" data-action="dictation-restart">
+            <i data-lucide="refresh-cw"></i>
+            重练本轮
+          </button>
+          <button class="btn btn-secondary" type="button" data-action="wrong-dictation">
+            <i data-lucide="notebook-tabs"></i>
+            复习错词
+          </button>
+          <button class="btn btn-secondary" type="button" data-action="navigate" data-route="home">
+            <i data-lucide="layout-grid"></i>
+            返回场景
+          </button>
+        </div>
+      </section>
+    `;
+    setActiveNav(dictationState.kind === "wrong" ? "wrong" : "home");
+    refreshIcons();
+  }
+
+  function setCountdownAppearance(seconds) {
+    const circle = document.getElementById("countdownCircle");
+    if (!circle) {
+      return;
+    }
+    const circumference = 2 * Math.PI * 60;
+    circle.style.strokeDasharray = String(circumference);
+    circle.style.strokeDashoffset = "0";
+    const number = document.getElementById("countdownNumber");
+    if (number) {
+      number.textContent = String(seconds);
+    }
+  }
+
+  function updateCountdown(timeLeft, seconds) {
+    const circle = document.getElementById("countdownCircle");
+    const number = document.getElementById("countdownNumber");
+    if (circle) {
+      const circumference = 2 * Math.PI * 60;
+      const elapsedRatio = 1 - timeLeft / seconds;
+      circle.style.strokeDashoffset = String(circumference * elapsedRatio);
+    }
+    if (number) {
+      number.textContent = String(Math.max(0, Math.ceil(timeLeft)));
+    }
+  }
+
+  function schedulePhase(seconds, onDone, onTick) {
+    if (phaseFrame) {
+      window.cancelAnimationFrame(phaseFrame);
+    }
+    const startedAt = performance.now();
+    const tick = (now) => {
+      const elapsed = (now - startedAt) / 1000;
+      const timeLeft = Math.max(0, seconds - elapsed);
+      onTick(timeLeft, seconds);
+      if (timeLeft <= 0) {
+        phaseFrame = null;
+        onDone();
+        return;
+      }
+      phaseFrame = window.requestAnimationFrame(tick);
+    };
+    phaseFrame = window.requestAnimationFrame(tick);
+  }
+
+  function beginSpellPhase() {
+    clearDictationTimers();
+    const current = currentDictationWord();
+    if (!current) {
+      dictationState.phase = "done";
+      renderDictation();
+      return;
+    }
+    dictationState.phase = "spell";
+    dictationState.spellValue = "";
+    dictationState.options = buildOptions(current.scene, current.word);
+    renderDictation();
+    playEnglish(current.scene, current.word, 1);
+  }
+
+  function finishSpellPhase() {
+    if (!dictationState || dictationState.phase !== "spell") {
+      return;
+    }
+    clearDictationTimers();
+    const current = currentDictationWord();
+    dictationState.spellingCorrect =
+      normalizeAnswer(dictationState.spellValue) ===
+      normalizeAnswer(current.word.english);
+    dictationState.phase = "meaning";
+    renderDictation();
+  }
+
+  function finishMeaningPhase(selectedOption) {
+    if (!dictationState || dictationState.phase !== "meaning") {
+      return;
+    }
+    clearDictationTimers();
+    const current = currentDictationWord();
+    const correct =
+      dictationState.spellingCorrect &&
+      selectedOption === current.word.chinese;
+    if (correct) {
+      recordCorrect(current.scene, current.word);
+    } else {
+      addWrong(current.scene, current.word);
+    }
+    dictationState.results.push({
+      ...current,
+      spelling: dictationState.spellValue,
+      selectedOption,
+      correct,
+    });
+    dictationState.phase = "feedback";
+    renderDictation();
+    playChinese(current.scene, current.word);
+    feedbackTimer = window.setTimeout(() => {
+      if (!dictationState || dictationState.phase !== "feedback") {
+        return;
+      }
+      dictationState.index += 1;
+      if (dictationState.index >= dictationState.queue.length) {
+        dictationState.phase = "done";
+        stopAudio();
+        renderDictation();
+      } else {
+        beginSpellPhase();
+      }
+    }, 850);
+  }
+
+  function buildDictationQueue(scene) {
+    return shuffle(scene.words).map((word) => ({ scene, word }));
+  }
+
+  function buildWrongQueue() {
+    return Object.values(readWrongBank())
+      .map((item) => {
+        const scene = sceneById.get(item.sceneId);
+        const word = scene?.words.find((candidate) => candidate.id === item.id);
+        return scene && word ? { scene, word } : null;
+      })
+      .filter(Boolean);
+  }
+
+  function startDictation(scene) {
+    dictationState = {
+      kind: "scene",
+      scene,
+      queue: buildDictationQueue(scene),
+      index: 0,
+      phase: "spell",
+      spellValue: "",
+      spellingCorrect: false,
+      options: [],
+      results: [],
+    };
+    renderDictation();
+    beginSpellPhase();
+  }
+
+  function startWrongDictation() {
+    const queue = shuffle(buildWrongQueue());
+    dictationState = {
+      kind: "wrong",
+      scene: null,
+      queue,
+      index: 0,
+      phase: "spell",
+      spellValue: "",
+      spellingCorrect: false,
+      options: [],
+      results: [],
+    };
+    renderDictation();
+    if (queue.length) {
+      beginSpellPhase();
+    }
+  }
+
+  function renderWrongBank() {
+    const bank = readWrongBank();
+    const items = Object.values(bank).sort((left, right) => {
+      if (left.sceneId !== right.sceneId) {
+        return left.sceneId.localeCompare(right.sceneId);
+      }
+      return right.wrongCount - left.wrongCount;
+    });
+    const sceneCount = new Set(items.map((item) => item.sceneId)).size;
+    const attempts = items.reduce((total, item) => total + item.wrongCount, 0);
+
+    if (!items.length) {
+      app.innerHTML = `
+        <div class="view-heading">
+          <button class="back-button" type="button" data-action="navigate" data-route="home" aria-label="返回场景">
+            <i data-lucide="arrow-left"></i>
+          </button>
+          <div class="view-heading-copy">
+            <h1>错词库</h1>
+            <p class="view-subtitle">答错或未拼出的词会保留在这里。</p>
+          </div>
+        </div>
+        <div class="empty-state">
+          <div>
+            <div class="empty-state-icon"><i data-lucide="notebook-tabs"></i></div>
+            <h2>还没有错词</h2>
+            <p>进入任意场景听写，系统会自动收集需要反复练习的词。</p>
+            <button class="btn btn-primary" type="button" data-action="navigate" data-route="home">
+              <i data-lucide="layout-grid"></i>
+              选择场景
+            </button>
+          </div>
+        </div>
+      `;
+      setActiveNav("wrong");
+      refreshIcons();
+      return;
+    }
+
+    const grouped = new Map();
+    for (const item of items) {
+      if (!grouped.has(item.sceneId)) {
+        grouped.set(item.sceneId, []);
+      }
+      grouped.get(item.sceneId).push(item);
+    }
+
+    const groups = [...grouped.entries()]
+      .map(([sceneId, groupItems]) => {
+        const scene = sceneById.get(sceneId);
+        return `
+          <section class="wrong-group">
+            <h2>${escapeHtml(scene?.title || "其他场景")}</h2>
+            ${groupItems
+              .map(
+                (item) => `
+                  <div class="wrong-word">
+                    <div>
+                      <strong>${escapeHtml(item.english)}</strong>
+                      <span>${escapeHtml(item.chinese)}</span>
+                    </div>
+                    <span class="wrong-word-meta">
+                      错 ${item.wrongCount} 次 · 连续正确 ${item.streak || 0}/2
+                    </span>
+                    <button
+                      class="icon-button btn btn-quiet"
+                      type="button"
+                      data-action="wrong-play"
+                      data-id="${escapeHtml(item.id)}"
+                      aria-label="播放 ${escapeHtml(item.english)}"
+                    >
+                      <i data-lucide="volume-2"></i>
+                    </button>
+                    <button
+                      class="icon-button btn btn-quiet"
+                      type="button"
+                      data-action="wrong-delete"
+                      data-id="${escapeHtml(item.id)}"
+                      aria-label="移除 ${escapeHtml(item.english)}"
+                    >
+                      <i data-lucide="x"></i>
+                    </button>
+                  </div>
+                `,
+              )
+              .join("")}
+          </section>
+        `;
+      })
+      .join("");
+
+    app.innerHTML = `
+      <div class="view-heading">
+        <button class="back-button" type="button" data-action="navigate" data-route="home" aria-label="返回场景">
+          <i data-lucide="arrow-left"></i>
+        </button>
+        <div class="view-heading-copy">
+          <h1>错词库</h1>
+          <p class="view-subtitle">连续答对两次后，单词会自动移出。</p>
+        </div>
+      </div>
+
+      <section class="wrong-summary">
+        <div class="wrong-stat">
+          <strong>${items.length}</strong>
+          <span>待复练词条</span>
+        </div>
+        <div class="wrong-stat">
+          <strong>${sceneCount}</strong>
+          <span>涉及场景</span>
+        </div>
+        <div class="wrong-stat">
+          <strong>${attempts}</strong>
+          <span>累计错误次数</span>
+        </div>
+      </section>
+
+      <div class="wrong-toolbar">
+        <button class="btn btn-primary" type="button" data-action="wrong-dictation">
+          <i data-lucide="keyboard"></i>
+          错词听写
+        </button>
+        <button class="btn btn-danger" type="button" data-action="clear-wrong">
+          <i data-lucide="trash-2"></i>
+          清空错词
+        </button>
+      </div>
+
+      <div class="wrong-list-panel">${groups}</div>
+    `;
+    setActiveNav("wrong");
+    refreshIcons();
+  }
+
+  function renderRoute() {
+    destroyView();
+    const currentRoute = route();
+    window.scrollTo({ top: 0, behavior: "instant" });
+
+    if (currentRoute.name === "study") {
+      const scene = sceneById.get(currentRoute.id);
+      if (!scene) {
+        goTo("home");
+        return;
+      }
+      const completed = getStudyCompletion(scene.id);
+      const firstIncomplete = scene.words.findIndex(
+        (word) => !completed.has(word.id),
+      );
+      studyState = {
+        sceneId: scene.id,
+        index: firstIncomplete >= 0 ? firstIncomplete : 0,
+        checked: false,
+        correct: false,
+        answer: "",
+        completed,
+      };
+      renderStudy();
+      return;
+    }
+
+    if (currentRoute.name === "dictation") {
+      if (currentRoute.id === "wrong-bank") {
+        startWrongDictation();
+      } else {
+        const scene = sceneById.get(currentRoute.id);
+        if (!scene) {
+          goTo("home");
+          return;
+        }
+        startDictation(scene);
+      }
+      return;
+    }
+
+    if (currentRoute.name === "wrong") {
+      renderWrongBank();
+      return;
+    }
+
+    renderHome();
+  }
+
+  function handleStudySubmit() {
+    if (!studyState || studyState.checked) {
+      return;
+    }
+    const scene = sceneById.get(studyState.sceneId);
+    const word = scene.words[studyState.index];
+    const input = document.getElementById("studyAnswer");
+    const answer = input?.value || "";
+    const correct = normalizeAnswer(answer) === normalizeAnswer(word.english);
+    studyState.checked = true;
+    studyState.correct = correct;
+    studyState.answer = answer;
+    if (correct) {
+      studyState.completed.add(word.id);
+      saveStudyCompletion(scene.id, studyState.completed);
+      recordCorrect(scene, word);
+    } else {
+      addWrong(scene, word);
+    }
+    renderStudy();
+    playChinese(scene, word);
+  }
+
+  function moveStudy(offset) {
+    if (!studyState) {
+      return;
+    }
+    const scene = sceneById.get(studyState.sceneId);
+    studyState.index =
+      (studyState.index + offset + scene.words.length) % scene.words.length;
+    studyState.checked = false;
+    studyState.correct = false;
+    studyState.answer = "";
+    renderStudy();
+  }
+
+  document.addEventListener("click", (event) => {
+    const target = event.target.closest("[data-action]");
+    if (!target) {
+      return;
+    }
+    const action = target.dataset.action;
+
+    if (action === "navigate") {
+      goTo(target.dataset.route);
+      return;
+    }
+
+    if (action === "study-play" || action === "study-replay") {
+      const scene = sceneById.get(studyState.sceneId);
+      const word = scene.words[studyState.index];
+      const rate = Number(
+        document.querySelector("[data-role='study-rate']")?.value || 1,
+      );
+      playEnglish(scene, word, rate);
+      return;
+    }
+
+    if (action === "study-play-answer") {
+      const scene = sceneById.get(studyState.sceneId);
+      const word = scene.words[studyState.index];
+      playChinese(scene, word);
+      return;
+    }
+
+    if (action === "study-prev") {
+      moveStudy(-1);
+      return;
+    }
+
+    if (action === "study-next") {
+      moveStudy(1);
+      return;
+    }
+
+    if (action === "study-jump") {
+      studyState.index = Number(target.dataset.index);
+      studyState.checked = false;
+      studyState.correct = false;
+      studyState.answer = "";
+      renderStudy();
+      return;
+    }
+
+    if (action === "dictation-option") {
+      finishMeaningPhase(target.dataset.option);
+      return;
+    }
+
+    if (action === "dictation-restart") {
+      if (dictationState.kind === "wrong") {
+        startWrongDictation();
+      } else {
+        startDictation(dictationState.scene);
+      }
+      return;
+    }
+
+    if (action === "wrong-dictation") {
+      goTo("dictation/wrong-bank");
+      return;
+    }
+
+    if (action === "wrong-play") {
+      const entry = readWrongBank()[target.dataset.id];
+      if (!entry) {
+        return;
+      }
+      const scene = sceneById.get(entry.sceneId);
+      const word = scene?.words.find((candidate) => candidate.id === entry.id);
+      if (scene && word) {
+        playEnglish(scene, word, 1);
+      }
+      return;
+    }
+
+    if (action === "wrong-delete") {
+      const bank = readWrongBank();
+      delete bank[target.dataset.id];
+      writeWrongBank(bank);
+      renderWrongBank();
+      return;
+    }
+
+    if (action === "clear-wrong") {
+      if (window.confirm("清空全部错词？")) {
+        writeWrongBank({});
+        renderWrongBank();
+      }
+    }
+  });
+
+  document.addEventListener("submit", (event) => {
+    if (event.target.matches("[data-role='study-form']")) {
+      event.preventDefault();
+      handleStudySubmit();
+    }
+  });
+
+  document.addEventListener("input", (event) => {
+    if (event.target.id === "sceneSearch") {
+      homeSearch = event.target.value;
+      const query = homeSearch.trim().toLowerCase();
+      document.querySelectorAll("[data-scene-card]").forEach((card) => {
+        card.hidden = query && !card.dataset.search.includes(query);
+      });
+      return;
+    }
+
+    if (event.target.id === "dictationAnswer" && dictationState) {
+      dictationState.spellValue = event.target.value;
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (
+      event.target.id === "dictationAnswer" &&
+      event.key === "Enter" &&
+      dictationState?.phase === "spell"
+    ) {
+      event.preventDefault();
+      finishSpellPhase();
+    }
+  });
+
+  if ("speechSynthesis" in window) {
+    voicesCache = window.speechSynthesis.getVoices();
+    window.speechSynthesis.addEventListener("voiceschanged", () => {
+      voicesCache = window.speechSynthesis.getVoices();
+    });
+  }
+
+  window.addEventListener("hashchange", renderRoute);
+  updateWrongCount();
+  renderRoute();
+})();
