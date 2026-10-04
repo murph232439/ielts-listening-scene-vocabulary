@@ -13,12 +13,6 @@
   };
 
   const SCENE_COLORS = ["#12736f", "#b85235", "#356f9d", "#b47a1d"];
-  const studyColors = {
-    outline: "#12736f",
-    rust: "#b85235",
-    blue: "#356f9d",
-    amber: "#b47a1d",
-  };
 
   let homeSearch = "";
   let studyState = null;
