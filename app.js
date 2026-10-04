@@ -23,7 +23,8 @@
   let feedbackTimer = null;
   let toastTimer = null;
   const sceneSearchCache = new Map();
-  let voicesCache = [];
+  const ttsBundlePromises = new Map();
+  const ttsObjectUrls = new Map();
 
   const sceneById = new Map(DATA.scenes.map((scene) => [scene.id, scene]));
   const wordIndex = new Map();
@@ -188,9 +189,6 @@
     audioElement.pause();
     audioElement.playbackRate = 1;
     audioElement.volume = 1;
-    if ("speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
   }
 
   function clearDictationTimers() {
@@ -209,65 +207,101 @@
     clearDictationTimers();
   }
 
-  function refreshVoices() {
-    if ("speechSynthesis" in window) {
-      voicesCache = window.speechSynthesis.getVoices();
-    }
+  function playFileClip(audioPath, rate = 1) {
+    stopAudio();
+    audioElement.src = new URL(audioPath, window.location.href).href;
+    audioElement.load();
+    audioElement.playbackRate = rate;
+    audioElement.volume = 1;
+    audioElement.play().catch(() => {
+      showToast("点击播放按钮后可播放语音");
+    });
   }
 
-  function preferredEnglishVoice() {
-    if (!voicesCache.length) {
-      refreshVoices();
+  function playEncodedClip(encoded, cacheKey, rate = 1) {
+    if (!encoded) {
+      return;
     }
-    const preferredNames = [
-      "samantha",
-      "ava",
-      "serena",
-      "allison",
-      "daniel",
-      "karen",
-      "moira",
-      "tessa",
-    ];
-    for (const name of preferredNames) {
-      const voice = voicesCache.find(
-        (item) => item.name.toLowerCase() === name,
-      );
-      if (voice) {
-        return voice;
+    let objectUrl = ttsObjectUrls.get(cacheKey);
+    if (!objectUrl) {
+      const binary = window.atob(encoded);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
       }
+      objectUrl = URL.createObjectURL(
+        new Blob([bytes], { type: "audio/mpeg" }),
+      );
+      ttsObjectUrls.set(cacheKey, objectUrl);
     }
-    return (
-      voicesCache.find((voice) => voice.lang.toLowerCase().startsWith("en-gb")) ||
-      voicesCache.find((voice) => voice.lang.toLowerCase().startsWith("en")) ||
-      null
+    stopAudio();
+    audioElement.src = objectUrl;
+    audioElement.load();
+    audioElement.playbackRate = rate;
+    audioElement.volume = 1;
+    audioElement.play().catch(() => {
+      showToast("点击播放按钮后可播放语音");
+    });
+  }
+
+  function loadTtsBundle(sceneId) {
+    if (window.VOCAB_TTS_BUNDLES?.[sceneId]) {
+      return Promise.resolve();
+    }
+    if (ttsBundlePromises.has(sceneId)) {
+      return ttsBundlePromises.get(sceneId);
+    }
+    const promise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = new URL(
+        `audio/tts-bundles/${sceneId}.js`,
+        window.location.href,
+      ).href;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("TTS bundle failed"));
+      document.head.appendChild(script);
+    }).catch((error) => {
+      ttsBundlePromises.delete(sceneId);
+      throw error;
+    });
+    ttsBundlePromises.set(sceneId, promise);
+    return promise;
+  }
+
+  function preloadTts(words) {
+    if (window.location.protocol === "file:") {
+      return;
+    }
+    new Set(words.map((word) => word.ttsBundle).filter(Boolean)).forEach(
+      (sceneId) => {
+        loadTtsBundle(sceneId).catch(() => {});
+      },
     );
   }
 
-  function speakWord(text, rate = 0.9) {
-    stopAudio();
-    if (!("speechSynthesis" in window)) {
-      showToast("当前浏览器不支持英文语音");
+  function playEnglish(scene, word, rate = 1) {
+    if (window.location.protocol === "file:" && word.ttsPath) {
+      playFileClip(word.ttsPath, rate);
       return;
     }
-    const utterance = new SpeechSynthesisUtterance(text);
-    const voice = preferredEnglishVoice();
-    if (voice) {
-      utterance.voice = voice;
-      utterance.lang = voice.lang;
-    } else {
-      utterance.lang = "en-GB";
+    const play = () => {
+      const encoded = window.VOCAB_TTS_BUNDLES?.[word.ttsBundle]?.[
+        word.ttsKey
+      ];
+      if (!encoded) {
+        showToast("语音加载失败，请重新点击");
+        return;
+      }
+      playEncodedClip(encoded, `${word.ttsBundle}:${word.ttsKey}`, rate);
+    };
+    if (window.VOCAB_TTS_BUNDLES?.[word.ttsBundle]) {
+      play();
+      return;
     }
-    utterance.rate = rate;
-    utterance.pitch = 1;
-    utterance.volume = 1;
-    window.__lastSpokenText = text;
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
-  }
-
-  function playEnglish(scene, word, rate = 1) {
-    speakWord(word.english, rate * 0.9);
+    showToast("正在加载语音");
+    loadTtsBundle(word.ttsBundle).then(play).catch(() => {
+      showToast("语音加载失败，请重新点击");
+    });
   }
 
   function sceneColor(index) {
@@ -275,8 +309,8 @@
   }
 
   function sceneCardMarkup(scene, index) {
-    const audioLabel = "合成发音";
-    const dictationDisabled = !("speechSynthesis" in window);
+    const audioLabel = "网络神经语音";
+    const dictationDisabled = false;
 
     return `
       <article
@@ -588,6 +622,7 @@
     `;
     setActiveNav("home");
     refreshIcons();
+    preloadTts(scene.words);
     const input = document.getElementById("studyAnswer");
     if (!studyState.checked && input) {
       input.focus();
@@ -772,6 +807,11 @@
     `;
     setActiveNav(dictationState.kind === "wrong" ? "wrong" : "home");
     refreshIcons();
+    preloadTts(
+      dictationState.kind === "wrong"
+        ? dictationState.queue.map((item) => item.word)
+        : dictationState.scene.words,
+    );
 
     if (dictationState.phase === "spell") {
       const input = document.getElementById("dictationAnswer");
@@ -1363,11 +1403,6 @@
       finishSpellPhase();
     }
   });
-
-  refreshVoices();
-  if ("speechSynthesis" in window) {
-    window.speechSynthesis.addEventListener("voiceschanged", refreshVoices);
-  }
 
   window.addEventListener("hashchange", renderRoute);
   updateWrongCount();
