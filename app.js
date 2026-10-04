@@ -21,6 +21,7 @@
   let feedbackTimer = null;
   let toastTimer = null;
   const audioBundlePromises = new Map();
+  const audioObjectUrls = new Map();
   const sceneSearchCache = new Map();
 
   const sceneById = new Map(DATA.scenes.map((scene) => [scene.id, scene]));
@@ -204,16 +205,31 @@
     clearDictationTimers();
   }
 
-  function playClip(audioFile, rate = 1) {
-    if (!audioFile) {
+  function playEncodedClip(encoded, cacheKey, rate = 1) {
+    if (!encoded) {
       return false;
     }
-    stopAudio();
-    const targetUrl = new URL(audioFile, window.location.href).href;
-    if (audioElement.src !== targetUrl) {
-      audioElement.src = targetUrl;
-      audioElement.load();
+    let objectUrl = audioObjectUrls.get(cacheKey);
+    if (!objectUrl) {
+      try {
+        const binary = window.atob(encoded);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) {
+          bytes[index] = binary.charCodeAt(index);
+        }
+        objectUrl = URL.createObjectURL(
+          new Blob([bytes], { type: "audio/mpeg" }),
+        );
+        audioObjectUrls.set(cacheKey, objectUrl);
+      } catch {
+        showToast("音频数据读取失败");
+        return false;
+      }
     }
+
+    stopAudio();
+    audioElement.src = objectUrl;
+    audioElement.load();
     audioElement.currentTime = 0;
     audioElement.playbackRate = rate;
     audioElement.volume = 1;
@@ -271,7 +287,11 @@
         showToast("该词原录音未覆盖，暂不可播放");
         return;
       }
-      playClip(`data:audio/mpeg;base64,${encoded}`, rate);
+      playEncodedClip(
+        encoded,
+        `${word.audioBundle}:${word.audioKey}`,
+        rate,
+      );
     };
     const bundle = window.VOCAB_AUDIO_BUNDLES?.[word.audioBundle];
     if (bundle) {
