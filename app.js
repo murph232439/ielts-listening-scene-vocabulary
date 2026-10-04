@@ -11,6 +11,8 @@
     wrong: "ielts-scene-vocab-wrong-v1",
     study: "ielts-scene-vocab-study-v1",
   };
+  const SPELL_SECONDS = 15;
+  const CHOICE_SECONDS = 10;
 
   const SCENE_COLORS = ["#12736f", "#b85235", "#356f9d", "#b47a1d"];
 
@@ -728,7 +730,7 @@
                   r="60"
                 ></circle>
               </svg>
-              <span class="countdown-number" id="countdownNumber">3</span>
+              <span class="countdown-number" id="countdownNumber">${SPELL_SECONDS}</span>
             </div>
             <h2 class="phase-title">听音拼写</h2>
             <p class="phase-note">倒计时结束后进入中文选择</p>
@@ -761,7 +763,7 @@
                   r="60"
                 ></circle>
               </svg>
-              <span class="countdown-number" id="countdownNumber">2</span>
+              <span class="countdown-number" id="countdownNumber">${CHOICE_SECONDS}</span>
             </div>
             <h2 class="phase-title">选择中文意思</h2>
             <p class="phase-note">
@@ -826,11 +828,11 @@
     if (dictationState.phase === "spell") {
       const input = document.getElementById("dictationAnswer");
       input?.focus();
-      setCountdownAppearance(3);
-      schedulePhase(3, finishSpellPhase, updateCountdown);
+      setCountdownAppearance(SPELL_SECONDS);
+      schedulePhase(SPELL_SECONDS, finishSpellPhase, updateCountdown);
     } else if (dictationState.phase === "meaning") {
-      setCountdownAppearance(2);
-      schedulePhase(2, () => finishMeaningPhase(null), updateCountdown);
+      setCountdownAppearance(CHOICE_SECONDS);
+      schedulePhase(CHOICE_SECONDS, () => finishMeaningPhase(null), updateCountdown);
     }
   }
 
