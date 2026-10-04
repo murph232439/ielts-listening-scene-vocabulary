@@ -17,10 +17,10 @@
   let homeSearch = "";
   let studyState = null;
   let dictationState = null;
-  let audioStopTimer = null;
   let phaseFrame = null;
   let feedbackTimer = null;
   let toastTimer = null;
+  const audioBundlePromises = new Map();
 
   const sceneById = new Map(DATA.scenes.map((scene) => [scene.id, scene]));
   const wordIndex = new Map();
@@ -182,10 +182,6 @@
   }
 
   function stopAudio() {
-    if (audioStopTimer) {
-      window.clearInterval(audioStopTimer);
-      audioStopTimer = null;
-    }
     audioElement.pause();
     audioElement.playbackRate = 1;
     audioElement.volume = 1;
@@ -207,96 +203,84 @@
     clearDictationTimers();
   }
 
-  function playRange(audioFile, range, rate = 1) {
-    if (!audioFile || !range) {
+  function playClip(audioFile, rate = 1) {
+    if (!audioFile) {
       return false;
     }
     stopAudio();
     const targetUrl = new URL(audioFile, window.location.href).href;
-    const needsNewSource = audioElement.src !== targetUrl;
-    if (needsNewSource) {
+    if (audioElement.src !== targetUrl) {
       audioElement.src = targetUrl;
       audioElement.load();
     }
-
-    const token = `${Date.now()}-${Math.random()}`;
-    audioElement.dataset.playToken = token;
-    let seekAttempts = 0;
-    let started = false;
-    const seekAndPlay = () => {
-      if (
-        started ||
-        audioElement.dataset.playToken !== token
-      ) {
-        return;
-      }
-      const start = Math.max(0, Number(range.start) || 0);
-      const completeSeek = () => {
-        if (started || audioElement.dataset.playToken !== token) {
-          return;
-        }
-        started = true;
-        audioElement.volume = 1;
-        audioStopTimer = window.setInterval(() => {
-          if (
-            !Number.isFinite(audioElement.duration) ||
-            audioElement.currentTime >= Number(range.end)
-          ) {
-            audioElement.pause();
-            window.clearInterval(audioStopTimer);
-            audioStopTimer = null;
-          }
-        }, 30);
-      };
-      const ensureSeek = () => {
-        if (started || audioElement.dataset.playToken !== token) {
-          return;
-        }
-        if (Math.abs(audioElement.currentTime - start) < 0.22) {
-          completeSeek();
-          return;
-        }
-        if (seekAttempts < 3) {
-          seekAttempts += 1;
-          audioElement.currentTime = start;
-          window.setTimeout(ensureSeek, 220);
-          return;
-        }
-        audioElement.pause();
-        audioElement.volume = 1;
-        showToast("无法定位到该词，请重新点击播放");
-      };
-
-      audioElement.volume = 0;
-      audioElement.playbackRate = rate;
-      audioElement
-        .play()
-        .then(ensureSeek)
-        .catch(() => {
-          audioElement.volume = 1;
-          showToast("点击播放按钮后可播放录音");
-        });
-      audioElement.currentTime = start;
-    };
-
-    if (audioElement.readyState >= 2) {
-      seekAndPlay();
-    } else {
-      const onReady = () => seekAndPlay();
-      audioElement.addEventListener("canplay", onReady, { once: true });
-      audioElement.addEventListener("loadeddata", onReady, { once: true });
-      audioElement.addEventListener("loadedmetadata", onReady, { once: true });
-    }
+    audioElement.currentTime = 0;
+    audioElement.playbackRate = rate;
+    audioElement.volume = 1;
+    audioElement.play().catch(() => {
+      showToast("点击播放按钮后可播放录音");
+    });
     return true;
   }
 
-  function playEnglish(scene, word, rate = 1) {
-    const audioFile = word.audioFile || scene.audioFile;
-    if (audioFile && word.audio) {
-      playRange(audioFile, word.audio, rate);
-    } else {
-      showToast("该词原录音未覆盖，暂不可播放");
+  function loadAudioBundle(sceneId) {
+    if (window.VOCAB_AUDIO_BUNDLES?.[sceneId]) {
+      return Promise.resolve();
     }
+    if (audioBundlePromises.has(sceneId)) {
+      return audioBundlePromises.get(sceneId);
+    }
+    const promise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = new URL(
+        `audio/bundles/${sceneId}.js`,
+        window.location.href,
+      ).href;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("audio bundle failed"));
+      document.head.appendChild(script);
+    }).catch((error) => {
+      audioBundlePromises.delete(sceneId);
+      throw error;
+    });
+    audioBundlePromises.set(sceneId, promise);
+    return promise;
+  }
+
+  function preloadSceneAudio(words) {
+    const bundleIds = new Set(
+      words
+        .map((word) => word.audioBundle)
+        .filter(Boolean),
+    );
+    bundleIds.forEach((sceneId) => {
+      loadAudioBundle(sceneId).catch(() => {});
+    });
+  }
+
+  function playEnglish(scene, word, rate = 1) {
+    if (!word.audioBundle || !word.audioKey) {
+      showToast("该词原录音未覆盖，暂不可播放");
+      return;
+    }
+    const play = () => {
+      const encoded = window.VOCAB_AUDIO_BUNDLES?.[word.audioBundle]?.[
+        word.audioKey
+      ];
+      if (!encoded) {
+        showToast("该词原录音未覆盖，暂不可播放");
+        return;
+      }
+      playClip(`data:audio/mpeg;base64,${encoded}`, rate);
+    };
+    const bundle = window.VOCAB_AUDIO_BUNDLES?.[word.audioBundle];
+    if (bundle) {
+      play();
+      return;
+    }
+    showToast("正在加载原声");
+    loadAudioBundle(word.audioBundle).then(play).catch(() => {
+      showToast("原声加载失败，请重新点击");
+    });
   }
 
   function sceneColor(index) {
@@ -636,6 +620,7 @@
     `;
     setActiveNav("home");
     refreshIcons();
+    preloadSceneAudio(scene.words);
     const input = document.getElementById("studyAnswer");
     if (!studyState.checked && input) {
       input.focus();
@@ -812,6 +797,11 @@
     `;
     setActiveNav(dictationState.kind === "wrong" ? "wrong" : "home");
     refreshIcons();
+    preloadSceneAudio(
+      dictationState.kind === "wrong"
+        ? dictationState.queue.map((item) => item.word)
+        : dictationState.scene.words,
+    );
 
     if (dictationState.phase === "spell") {
       const input = document.getElementById("dictationAnswer");
