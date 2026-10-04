@@ -207,6 +207,21 @@
     clearDictationTimers();
   }
 
+  function playFileClip(audioPath, rate = 1) {
+    if (!audioPath) {
+      return false;
+    }
+    stopAudio();
+    audioElement.src = new URL(audioPath, window.location.href).href;
+    audioElement.load();
+    audioElement.playbackRate = rate;
+    audioElement.volume = 1;
+    audioElement.play().catch(() => {
+      showToast("点击播放按钮后可播放录音");
+    });
+    return true;
+  }
+
   function playEncodedClip(encoded, cacheKey, rate = 1) {
     if (!encoded) {
       return false;
@@ -266,6 +281,9 @@
   }
 
   function preloadSceneAudio(words) {
+    if (window.location.protocol === "file:") {
+      return;
+    }
     const bundleIds = new Set(
       words
         .map((word) => word.audioBundle)
@@ -277,6 +295,10 @@
   }
 
   function playEnglish(scene, word, rate = 1) {
+    if (window.location.protocol === "file:" && word.audioPath) {
+      playFileClip(word.audioPath, rate);
+      return;
+    }
     if (!word.audioBundle || !word.audioKey) {
       showToast("该词原录音未覆盖，暂不可播放");
       return;
