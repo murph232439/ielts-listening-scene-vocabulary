@@ -48,9 +48,61 @@
       .normalize("NFKC")
       .toLowerCase()
       .replaceAll("’", "'")
-      .replace(/[.,!?;:]+$/g, "")
+      .replace(/&/g, " and ")
+      .replace(/[^a-z0-9']+/g, " ")
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  function answerVariants(value) {
+    const source = String(value || "").trim();
+    const variants = new Set([normalizeAnswer(source)]);
+    const withoutParentheses = source.replace(/\([^)]*\)/g, " ");
+    variants.add(normalizeAnswer(withoutParentheses));
+
+    const parentheticalValues = [...source.matchAll(/\(([^)]+)\)/g)];
+    for (const match of parentheticalValues) {
+      if (match[1].length > 1) {
+        variants.add(normalizeAnswer(match[1]));
+      }
+    }
+
+    const expanded = source.replace(/\(([^)]+)\)/g, "$1");
+    variants.add(normalizeAnswer(expanded));
+    if (source.includes("-")) {
+      variants.add(normalizeAnswer(source.replace(/-/g, "")));
+      variants.add(normalizeAnswer(expanded.replace(/-/g, "")));
+    }
+
+    if (source.includes("/")) {
+      const alternatives = source
+        .split("/")
+        .map((part) => normalizeAnswer(part))
+        .filter(Boolean);
+      alternatives.forEach((part) => variants.add(part));
+      variants.add(normalizeAnswer(alternatives.join(" ")));
+    }
+
+    for (const variant of [...variants]) {
+      variants.add(
+        normalizeAnswer(
+          variant
+            .replace(/\bcentre\b/g, "center")
+            .replace(/\bcolour\b/g, "color")
+            .replace(/\bneighbour\b/g, "neighbor")
+            .replace(/\bfavour\b/g, "favor")
+            .replace(/\btravelling\b/g, "traveling")
+            .replace(/\bcatalogue\b/g, "catalog")
+            .replace(/\bprogramme\b/g, "program"),
+        ),
+      );
+    }
+
+    return variants;
+  }
+
+  function isSpellingCorrect(input, expected) {
+    return answerVariants(expected).has(normalizeAnswer(input));
   }
 
   function shuffle(items) {
@@ -961,9 +1013,10 @@
     }
     clearDictationTimers();
     const current = currentDictationWord();
-    dictationState.spellingCorrect =
-      normalizeAnswer(dictationState.spellValue) ===
-      normalizeAnswer(current.word.english);
+    dictationState.spellingCorrect = isSpellingCorrect(
+      dictationState.spellValue,
+      current.word.english,
+    );
     dictationState.phase = "meaning";
     renderDictation();
   }
@@ -1245,7 +1298,7 @@
     const word = scene.words[studyState.index];
     const input = document.getElementById("studyAnswer");
     const answer = input?.value || "";
-    const correct = normalizeAnswer(answer) === normalizeAnswer(word.english);
+    const correct = isSpellingCorrect(answer, word.english);
     studyState.checked = true;
     studyState.correct = correct;
     studyState.answer = answer;
