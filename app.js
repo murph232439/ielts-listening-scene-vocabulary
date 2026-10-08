@@ -10,6 +10,7 @@
   const STORAGE_KEYS = {
     wrong: "ielts-scene-vocab-wrong-v2",
     study: "ielts-scene-vocab-study-v2",
+    checkin: "ielts-scene-vocab-checkin-v1",
   };
   const SPELL_SECONDS = 15;
   const CHOICE_SECONDS = 10;
@@ -159,6 +160,38 @@
   function getStudyCompletion(sceneId) {
     const progress = readStudyProgress();
     return new Set(progress[sceneId] || []);
+  }
+
+  function readCheckIns() {
+    return readStorage(STORAGE_KEYS.checkin, {});
+  }
+
+  function saveCheckIn(sceneId, accuracy) {
+    const checkIns = readCheckIns();
+    checkIns[sceneId] = {
+      accuracy,
+      completedAt: Date.now(),
+    };
+    writeStorage(STORAGE_KEYS.checkin, checkIns);
+  }
+
+  function launchConfetti() {
+    const layer = document.createElement("div");
+    layer.className = "confetti-layer";
+    const colors = ["#12736f", "#b85235", "#356f9d", "#b47a1d", "#e3b23c"];
+    const pieces = Array.from({ length: 90 }, (_, index) => {
+      const piece = document.createElement("span");
+      piece.className = "confetti-piece";
+      piece.style.left = `${Math.random() * 100}%`;
+      piece.style.background = colors[index % colors.length];
+      piece.style.animationDelay = `${Math.random() * 0.8}s`;
+      piece.style.animationDuration = `${2.8 + Math.random() * 2.2}s`;
+      piece.style.transform = `rotate(${Math.random() * 360}deg)`;
+      return piece;
+    });
+    pieces.forEach((piece) => layer.appendChild(piece));
+    document.body.appendChild(layer);
+    window.setTimeout(() => layer.remove(), 5600);
   }
 
   function addWrong(scene, word) {
@@ -897,15 +930,38 @@
   function renderDictationSummary() {
     const wrongResults = dictationState.results.filter((result) => !result.correct);
     const correctCount = dictationState.results.length - wrongResults.length;
+    const accuracy = dictationState.results.length
+      ? Math.round((correctCount / dictationState.results.length) * 100)
+      : 0;
+    const sceneTitle =
+      dictationState.kind === "wrong"
+        ? "错词复练"
+        : dictationState.scene.title;
+    const completionLabel =
+      dictationState.kind === "wrong"
+        ? "听写与词义选择已完成"
+        : `${dictationState.scene.title} · 听写与词义选择已完成`;
+    const checkIn = readCheckIns()[dictationState.scene?.id];
     app.innerHTML = `
       ${renderDictationHeader()}
-      <section class="session-summary">
-        <div class="summary-score">
-          <div class="score-circle">${correctCount}/${dictationState.results.length}</div>
-          <div>
-            <h2>本轮完成</h2>
-            <p>${wrongResults.length ? `${wrongResults.length} 个词已进入错词库` : "本轮全部正确"}</p>
+      <section class="session-summary checkin-summary">
+        <div class="checkin-hero">
+          <div class="checkin-icon">
+            <i data-lucide="party-popper"></i>
           </div>
+          <h2 class="checkin-title">Congratulations!</h2>
+          <p class="checkin-scene">${escapeHtml(completionLabel)}</p>
+          <div class="checkin-accuracy">
+            <strong>${accuracy}%</strong>
+            <span>抽查正确率</span>
+          </div>
+          <p class="checkin-count">
+            听写与词义选择共 ${dictationState.results.length} 词 ·
+            正确 ${correctCount} 词
+          </p>
+          <p class="checkin-status">
+            ${checkIn ? "今日已打卡" : "本轮已完成"}
+          </p>
         </div>
 
         ${wrongResults.length ? `
@@ -944,6 +1000,7 @@
     `;
     setActiveNav(dictationState.kind === "wrong" ? "wrong" : "home");
     refreshIcons();
+    launchConfetti();
   }
 
   function setCountdownAppearance(seconds) {
@@ -1051,6 +1108,17 @@
       if (dictationState.index >= dictationState.queue.length) {
         dictationState.phase = "done";
         stopAudio();
+        if (dictationState.kind === "scene" && dictationState.scene) {
+          const finalCorrect = dictationState.results.filter(
+            (result) => result.correct,
+          ).length;
+          const accuracy = dictationState.results.length
+            ? Math.round(
+                (finalCorrect / dictationState.results.length) * 100,
+              )
+            : 0;
+          saveCheckIn(dictationState.scene.id, accuracy);
+        }
         renderDictation();
       } else {
         beginSpellPhase();
